@@ -113,6 +113,18 @@ return [
             // 'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', 'false'),
         ],
 
+        'erp' => [
+            'driver' => 'sqlsrv',
+            'host' => env('DB_HOST2', '10.1.10.52'),
+            'port' => env('DB_PORT2', '1433'),
+            'database' => env('DB_DATABASE2', 'soi107'),
+            'username' => env('DB_USERNAME2', 'portal'),
+            'password' => env('DB_PASSWORD2', 'San0h!nd'),
+            'charset' => 'utf8',
+            'prefix' => '',
+            'prefix_indexes' => true,
+        ],
+
     ],
 
     /*
