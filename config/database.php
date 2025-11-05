@@ -124,6 +124,17 @@ return [
             'prefix' => '',
             'prefix_indexes' => true,
         ],
+        'erp2' => [
+            'driver' => 'sqlsrv',
+            'host' => env('DB_HOST3', '10.1.10.50'),
+            'port' => env('DB_PORT3', '1433'),
+            'database' => env('DB_DATABASE3', 'soi107'),
+            'username' => env('DB_USERNAME3', 'sanoh'),
+            'password' => env('DB_PASSWORD3', 'San0h!nd'),
+            'charset' => 'utf8',
+            'prefix' => '',
+            'prefix_indexes' => true,
+        ],
 
     ],
 

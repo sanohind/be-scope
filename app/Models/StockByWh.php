@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class StockByWh extends Model
 {
+    protected $connection = 'erp';
     protected $table = 'stockbywh';
     public $timestamps = false;
 

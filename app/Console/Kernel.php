@@ -13,18 +13,18 @@ class Kernel extends ConsoleKernel
     protected function schedule(Schedule $schedule)
     {
         // // Run ERP sync every hour (for production)
-        // $schedule->command('sync:erp-data')
-        //          ->hourly()
-        //          ->withoutOverlapping()
-        //          ->runInBackground()
-        //          ->appendOutputTo(storage_path('logs/sync.log'));
-
-        //Alternative: Run every 5 minutes for testing (uncomment to test)
         $schedule->command('sync:erp-data')
-                 ->everyFiveMinutes()
+                 ->hourly()
                  ->withoutOverlapping()
                  ->runInBackground()
                  ->appendOutputTo(storage_path('logs/sync.log'));
+
+        //Alternative: Run every 5 minutes for testing (uncomment to test)
+        // $schedule->command('sync:erp-data')
+        //          ->everyFiveMinutes()
+        //          ->withoutOverlapping()
+        //          ->runInBackground()
+        //          ->appendOutputTo(storage_path('logs/sync.log'));
     }
 
     /**

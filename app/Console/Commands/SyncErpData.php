@@ -14,11 +14,15 @@ class SyncErpData extends Command
 
     public function handle()
     {
+        // Increase memory limit for large datasets
+        ini_set('memory_limit', '1024M');
+        
         $isManual = $this->option('manual');
         $syncType = $isManual ? 'manual' : 'scheduled';
 
         $this->info("Starting {$syncType} sync...");
 
+        // Create sync log BEFORE disabling query log
         $syncLog = SyncLog::create([
             'sync_type' => $syncType,
             'status' => 'running',
@@ -27,6 +31,12 @@ class SyncErpData extends Command
             'success_records' => 0,
             'failed_records' => 0,
         ]);
+        
+        $this->info("Sync Log ID: {$syncLog->id}");
+        
+        // Disable query logging to save memory (only for ERP connections)
+        DB::connection('erp')->disableQueryLog();
+        DB::connection('erp2')->disableQueryLog();
 
         try {
             $totalRecords = 0;
@@ -75,28 +85,37 @@ class SyncErpData extends Command
             $successRecords += $result['success'];
             $failedRecords += $result['failed'];
 
-            $syncLog->update([
-                'status' => 'completed',
-                'completed_at' => now(),
-                'total_records' => $totalRecords,
-                'success_records' => $successRecords,
-                'failed_records' => $failedRecords,
-                'error_message' => null,
-            ]);
+            // Sync SoInvoiceLine2 from ERP2
+            $this->info('Syncing SoInvoiceLine2 from ERP2...');
+            $result = $this->syncSoInvoiceLine2();
+            $totalRecords += $result['total'];
+            $successRecords += $result['success'];
+            $failedRecords += $result['failed'];
+
+            // Update sync log with final results
+            $syncLog->status = 'completed';
+            $syncLog->completed_at = now();
+            $syncLog->total_records = $totalRecords;
+            $syncLog->success_records = $successRecords;
+            $syncLog->failed_records = $failedRecords;
+            $syncLog->error_message = null;
+            $syncLog->save();
 
             $this->info("Sync completed successfully!");
+            $this->info("Sync Log ID: {$syncLog->id}");
             $this->info("Total records: {$totalRecords}");
             $this->info("Success: {$successRecords}");
             $this->info("Failed: {$failedRecords}");
 
         } catch (Exception $e) {
-            $syncLog->update([
-                'status' => 'failed',
-                'completed_at' => now(),
-                'error_message' => $e->getMessage(),
-            ]);
+            // Update sync log on failure
+            $syncLog->status = 'failed';
+            $syncLog->completed_at = now();
+            $syncLog->error_message = $e->getMessage();
+            $syncLog->save();
 
             $this->error("Sync failed: " . $e->getMessage());
+            $this->error("Sync Log ID: {$syncLog->id}");
             return 1;
         }
 
@@ -109,15 +128,17 @@ class SyncErpData extends Command
             // Clear existing data
             DB::table('stockbywh')->truncate();
 
-            // Get data from ERP (assuming you have ERP connection configured)
-            $erpData = DB::connection('erp')->table('stockbywh')->get();
-
             $success = 0;
             $failed = 0;
+            $total = 0;
+            $chunkSize = 500;
 
-            foreach ($erpData as $record) {
-                try {
-                    DB::table('stockbywh')->insert([
+            // Process data in chunks to avoid memory issues
+            DB::connection('erp')->table('stockbywh')->orderBy('partno')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
+                $batch = [];
+                
+                foreach ($records as $record) {
+                    $batch[] = [
                         'warehouse' => $record->warehouse,
                         'partno' => $record->partno,
                         'desc' => $record->desc,
@@ -137,15 +158,25 @@ class SyncErpData extends Command
                         'max_stock' => $record->max_stock,
                         'unit' => $record->unit,
                         'location' => $record->location,
-                    ]);
-                    $success++;
-                } catch (Exception $e) {
-                    $failed++;
-                    $this->warn("Failed to insert stockbywh record: " . $e->getMessage());
+                    ];
+                    $total++;
                 }
-            }
 
-            return ['total' => count($erpData), 'success' => $success, 'failed' => $failed];
+                try {
+                    DB::table('stockbywh')->insert($batch);
+                    $success += count($batch);
+                    $this->info("Processed " . number_format($total) . " StockByWh records...");
+                    
+                    // Free memory
+                    unset($batch);
+                    gc_collect_cycles();
+                } catch (Exception $e) {
+                    $failed += count($batch);
+                    $this->warn("Failed to insert stockbywh batch: " . $e->getMessage());
+                }
+            });
+
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
             $this->error("Error syncing StockByWh: " . $e->getMessage());
@@ -158,14 +189,16 @@ class SyncErpData extends Command
         try {
             DB::table('view_warehouse_order')->truncate();
 
-            $erpData = DB::connection('erp')->table('view_warehouse_order')->get();
-
             $success = 0;
             $failed = 0;
+            $total = 0;
+            $chunkSize = 500;
 
-            foreach ($erpData as $record) {
-                try {
-                    DB::table('view_warehouse_order')->insert([
+            DB::connection('erp')->table('view_warehouse_order')->orderBy('order_origin_code')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
+                $batch = [];
+                
+                foreach ($records as $record) {
+                    $batch[] = [
                         'order_origin_code' => $record->order_origin_code,
                         'order_origin' => $record->order_origin,
                         'trx_type' => $record->trx_type,
@@ -177,15 +210,23 @@ class SyncErpData extends Command
                         'ship_to_type' => $record->ship_to_type,
                         'ship_to' => $record->ship_to,
                         'ship_to_desc' => $record->ship_to_desc,
-                    ]);
-                    $success++;
-                } catch (Exception $e) {
-                    $failed++;
-                    $this->warn("Failed to insert warehouse order record: " . $e->getMessage());
+                    ];
+                    $total++;
                 }
-            }
 
-            return ['total' => count($erpData), 'success' => $success, 'failed' => $failed];
+                try {
+                    DB::table('view_warehouse_order')->insert($batch);
+                    $success += count($batch);
+                    $this->info("Processed " . number_format($total) . " WarehouseOrder records...");
+                    unset($batch);
+                    gc_collect_cycles();
+                } catch (Exception $e) {
+                    $failed += count($batch);
+                    $this->warn("Failed to insert warehouse order batch: " . $e->getMessage());
+                }
+            });
+
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
             $this->error("Error syncing WarehouseOrder: " . $e->getMessage());
@@ -198,14 +239,16 @@ class SyncErpData extends Command
         try {
             DB::table('view_warehouse_order_line')->truncate();
 
-            $erpData = DB::connection('erp')->table('view_warehouse_order_line')->get();
-
             $success = 0;
             $failed = 0;
+            $total = 0;
+            $chunkSize = 500;
 
-            foreach ($erpData as $record) {
-                try {
-                    DB::table('view_warehouse_order_line')->insert([
+            DB::connection('erp')->table('view_warehouse_order_line')->orderBy('order_origin_code')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
+                $batch = [];
+                
+                foreach ($records as $record) {
+                    $batch[] = [
                         'order_origin_code' => $record->order_origin_code,
                         'order_origin' => $record->order_origin,
                         'trx_type' => $record->trx_type,
@@ -228,15 +271,23 @@ class SyncErpData extends Command
                         'unit' => $record->unit,
                         'line_status_code' => $record->line_status_code,
                         'line_status' => $record->line_status,
-                    ]);
-                    $success++;
-                } catch (Exception $e) {
-                    $failed++;
-                    $this->warn("Failed to insert warehouse order line record: " . $e->getMessage());
+                    ];
+                    $total++;
                 }
-            }
 
-            return ['total' => count($erpData), 'success' => $success, 'failed' => $failed];
+                try {
+                    DB::table('view_warehouse_order_line')->insert($batch);
+                    $success += count($batch);
+                    $this->info("Processed " . number_format($total) . " WarehouseOrderLine records...");
+                    unset($batch);
+                    gc_collect_cycles();
+                } catch (Exception $e) {
+                    $failed += count($batch);
+                    $this->warn("Failed to insert warehouse order line batch: " . $e->getMessage());
+                }
+            });
+
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
             $this->error("Error syncing WarehouseOrderLine: " . $e->getMessage());
@@ -249,14 +300,16 @@ class SyncErpData extends Command
         try {
             DB::table('so_invoice_line')->truncate();
 
-            $erpData = DB::connection('erp')->table('so_invoice_line')->get();
-
             $success = 0;
             $failed = 0;
+            $total = 0;
+            $chunkSize = 500;
 
-            foreach ($erpData as $record) {
-                try {
-                    DB::table('so_invoice_line')->insert([
+            DB::connection('erp')->table('so_invoice_line')->orderBy('sales_order')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
+                $batch = [];
+                
+                foreach ($records as $record) {
+                    $batch[] = [
                         'bp_code' => $record->bp_code,
                         'bp_name' => $record->bp_name,
                         'sales_order' => $record->sales_order,
@@ -293,15 +346,23 @@ class SyncErpData extends Command
                         'inv_stat' => $record->inv_stat,
                         'invoice_status' => $record->invoice_status,
                         'dlv_log_date' => $record->dlv_log_date,
-                    ]);
-                    $success++;
-                } catch (Exception $e) {
-                    $failed++;
-                    $this->warn("Failed to insert so invoice line record: " . $e->getMessage());
+                    ];
+                    $total++;
                 }
-            }
 
-            return ['total' => count($erpData), 'success' => $success, 'failed' => $failed];
+                try {
+                    DB::table('so_invoice_line')->insert($batch);
+                    $success += count($batch);
+                    $this->info("Processed " . number_format($total) . " SoInvoiceLine records...");
+                    unset($batch);
+                    gc_collect_cycles();
+                } catch (Exception $e) {
+                    $failed += count($batch);
+                    $this->warn("Failed to insert so invoice line batch: " . $e->getMessage());
+                }
+            });
+
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
             $this->error("Error syncing SoInvoiceLine: " . $e->getMessage());
@@ -314,14 +375,16 @@ class SyncErpData extends Command
         try {
             DB::table('view_prod_header')->truncate();
 
-            $erpData = DB::connection('erp')->table('view_prod_header')->get();
-
             $success = 0;
             $failed = 0;
+            $total = 0;
+            $chunkSize = 500;
 
-            foreach ($erpData as $record) {
-                try {
-                    DB::table('view_prod_header')->insert([
+            DB::connection('erp')->table('view_prod_header')->orderBy('prod_index')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
+                $batch = [];
+                
+                foreach ($records as $record) {
+                    $batch[] = [
                         'prod_index' => $record->prod_index,
                         'prod_no' => $record->prod_no,
                         'planning_date' => $record->planning_date,
@@ -341,15 +404,23 @@ class SyncErpData extends Command
                         'qty_os' => $record->qty_os,
                         'warehouse' => $record->warehouse,
                         'divisi' => $record->divisi,
-                    ]);
-                    $success++;
-                } catch (Exception $e) {
-                    $failed++;
-                    $this->warn("Failed to insert prod header record: " . $e->getMessage());
+                    ];
+                    $total++;
                 }
-            }
 
-            return ['total' => count($erpData), 'success' => $success, 'failed' => $failed];
+                try {
+                    DB::table('view_prod_header')->insert($batch);
+                    $success += count($batch);
+                    $this->info("Processed " . number_format($total) . " ProdHeader records...");
+                    unset($batch);
+                    gc_collect_cycles();
+                } catch (Exception $e) {
+                    $failed += count($batch);
+                    $this->warn("Failed to insert prod header batch: " . $e->getMessage());
+                }
+            });
+
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
             $this->error("Error syncing ProdHeader: " . $e->getMessage());
@@ -362,14 +433,16 @@ class SyncErpData extends Command
         try {
             DB::table('data_receipt_purchase')->truncate();
 
-            $erpData = DB::connection('erp')->table('data_receipt_purchase')->get();
-
             $success = 0;
             $failed = 0;
+            $total = 0;
+            $chunkSize = 500;
 
-            foreach ($erpData as $record) {
-                try {
-                    DB::table('data_receipt_purchase')->insert([
+            DB::connection('erp')->table('data_receipt_purchase')->orderBy('receipt_no')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
+                $batch = [];
+                
+                foreach ($records as $record) {
+                    $batch[] = [
                         'po_no' => $record->po_no,
                         'bp_id' => $record->bp_id,
                         'bp_name' => $record->bp_name,
@@ -410,18 +483,97 @@ class SyncErpData extends Command
                         'inv_due_date' => $record->inv_due_date,
                         'payment_doc' => $record->payment_doc,
                         'payment_doc_date' => $record->payment_doc_date,
-                    ]);
-                    $success++;
-                } catch (Exception $e) {
-                    $failed++;
-                    $this->warn("Failed to insert receipt purchase record: " . $e->getMessage());
+                    ];
+                    $total++;
                 }
-            }
 
-            return ['total' => count($erpData), 'success' => $success, 'failed' => $failed];
+                try {
+                    DB::table('data_receipt_purchase')->insert($batch);
+                    $success += count($batch);
+                    $this->info("Processed " . number_format($total) . " ReceiptPurchase records...");
+                    unset($batch);
+                    gc_collect_cycles();
+                } catch (Exception $e) {
+                    $failed += count($batch);
+                    $this->warn("Failed to insert receipt purchase batch: " . $e->getMessage());
+                }
+            });
+
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
             $this->error("Error syncing ReceiptPurchase: " . $e->getMessage());
+            return ['total' => 0, 'success' => 0, 'failed' => 0];
+        }
+    }
+
+    private function syncSoInvoiceLine2()
+    {
+        try {
+            DB::table('so_invoice_line_2')->truncate();
+
+            $success = 0;
+            $failed = 0;
+            $total = 0;
+            $chunkSize = 500;
+
+            DB::connection('erp2')->table('so_invoice_line')->orderBy('sales_order')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
+                $batch = [];
+                
+                foreach ($records as $record) {
+                    $batch[] = [
+                        'bp_code' => $record->bp_code,
+                        'bp_name' => $record->bp_name,
+                        'sales_order' => $record->sales_order,
+                        'so_date' => $record->so_date,
+                        'so_line' => $record->so_line,
+                        'so_sequence' => $record->so_sequence,
+                        'customer_po' => $record->customer_po,
+                        'shipment' => $record->shipment,
+                        'shipment_line' => $record->shipment_line,
+                        'delivery_date' => $record->delivery_date,
+                        'part_no' => $record->part_no,
+                        'old_partno' => $record->old_partno,
+                        'product_type' => $record->product_type,
+                        'cust_partno' => $record->cust_partno,
+                        'cust_partname' => $record->cust_partname,
+                        'delivered_qty' => $record->delivered_qty,
+                        'unit' => $record->unit,
+                        'shipment_reference' => $record->shipment_reference,
+                        'status' => $record->status,
+                        'shipment_status' => $record->shipment_status,
+                        'invoice_no' => $record->invoice_no,
+                        'inv_line' => $record->inv_line,
+                        'invoice_date' => $record->invoice_date,
+                        'invoice_qty' => $record->invoice_qty,
+                        'currency' => $record->currency,
+                        'price' => $record->price,
+                        'amount' => $record->amount,
+                        'price_hc' => $record->price_hc,
+                        'amount_hc' => $record->amount_hc,
+                        'inv_stat' => $record->inv_stat,
+                        'invoice_status' => $record->invoice_status,
+                        'dlv_log_date' => $record->dlv_log_date,
+                    ];
+                    $total++;
+                }
+
+                try {
+                    DB::table('so_invoice_line_2')->insert($batch);
+                    $success += count($batch);
+                    $this->info("Processed " . number_format($total) . " SoInvoiceLine2 records...");
+                    unset($batch);
+                    gc_collect_cycles();
+                } catch (Exception $e) {
+                    $failed += count($batch);
+                    $this->warn("Failed to insert so invoice line 2 batch: " . $e->getMessage());
+                }
+            });
+
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
+
+        } catch (Exception $e) {
+            $this->error("Error syncing SoInvoiceLine2: " . $e->getMessage());
             return ['total' => 0, 'success' => 0, 'failed' => 0];
         }
     }

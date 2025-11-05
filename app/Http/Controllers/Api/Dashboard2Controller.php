@@ -17,9 +17,19 @@ class Dashboard2Controller extends ApiController
     {
         $totalOrderLines = WarehouseOrderLine::count();
 
-        $pendingDeliveries = WarehouseOrderLine::where('line_status', 'Pending')->count();
+        // Count by actual line_status values: Staged, NULL, Adviced, Released, Open, Shipped
+        $stagedOrders = WarehouseOrderLine::where('line_status', 'Staged')->count();
+        $nullStatusOrders = WarehouseOrderLine::whereNull('line_status')->count();
+        $advicedOrders = WarehouseOrderLine::where('line_status', 'Adviced')->count();
+        $releasedOrders = WarehouseOrderLine::where('line_status', 'Released')->count();
+        $openOrders = WarehouseOrderLine::where('line_status', 'Open')->count();
+        $shippedOrders = WarehouseOrderLine::where('line_status', 'Shipped')->count();
 
-        $completedOrders = WarehouseOrderLine::where('line_status', 'Completed')->count();
+        // Pending deliveries: Staged, NULL, Adviced, Released, Open
+        $pendingDeliveries = $stagedOrders + $nullStatusOrders + $advicedOrders + $releasedOrders + $openOrders;
+
+        // Completed orders: Shipped
+        $completedOrders = $shippedOrders;
 
         $avgFulfillmentRate = WarehouseOrderLine::where('order_qty', '>', 0)
             ->selectRaw('AVG((ship_qty / order_qty) * 100) as avg_fulfillment_rate')
@@ -29,7 +39,15 @@ class Dashboard2Controller extends ApiController
             'total_order_lines' => $totalOrderLines,
             'pending_deliveries' => $pendingDeliveries,
             'completed_orders' => $completedOrders,
-            'average_fulfillment_rate' => round($avgFulfillmentRate ?? 0, 2)
+            'average_fulfillment_rate' => round($avgFulfillmentRate ?? 0, 2),
+            'status_breakdown' => [
+                'staged' => $stagedOrders,
+                'null_status' => $nullStatusOrders,
+                'adviced' => $advicedOrders,
+                'released' => $releasedOrders,
+                'open' => $openOrders,
+                'shipped' => $shippedOrders
+            ]
         ]);
     }
 
@@ -195,46 +213,207 @@ class Dashboard2Controller extends ApiController
 
     /**
      * Chart 2.8: Warehouse Order Timeline - Gantt Chart
+     *
+     * Returns optimized order timeline data for Gantt Chart visualization
+     * Only essential fields: order_no, dates (order/delivery/receipt), status, and basic metadata
+     *
+     * Query Parameters:
+     * - date_from: Start date filter (order_date)
+     * - date_to: End date filter (order_date)
+     * - status: Filter by delivery status (on_time, delayed, pending)
+     * - ship_from: Filter by warehouse (ship_from)
+     * - ship_to: Filter by destination (ship_to)
+     * - limit: Number of orders to return (default: 50, max: 100)
      */
     public function warehouseOrderTimeline(Request $request): JsonResponse
     {
-        $query = WarehouseOrderLine::query();
+        $limit = min($request->get('limit', 50), 100);
 
+        $query = DB::table('view_warehouse_order_line')
+            ->select([
+                'order_no',
+                'ship_from',
+                'ship_from_desc',
+                'ship_to',
+                'ship_to_desc',
+            ])
+            ->selectRaw('MIN(order_date) as order_date')
+            ->selectRaw('MIN(delivery_date) as delivery_date')
+            ->selectRaw('MAX(receipt_date) as receipt_date')
+            ->selectRaw('CASE
+                WHEN MAX(receipt_date) IS NULL THEN "pending"
+                WHEN MAX(receipt_date) <= MIN(delivery_date) THEN "on_time"
+                WHEN MAX(receipt_date) > MIN(delivery_date) THEN "delayed"
+                ELSE "pending"
+            END as status')
+            ->groupBy([
+                'order_no',
+                'ship_from',
+                'ship_from_desc',
+                'ship_to',
+                'ship_to_desc'
+            ]);
+
+        // Apply filters
         if ($request->has('date_from')) {
-            $query->where('order_date', '>=', $request->date_from);
+            $query->havingRaw('MIN(order_date) >= ?', [$request->date_from]);
         }
         if ($request->has('date_to')) {
-            $query->where('order_date', '<=', $request->date_to);
-        }
-        if ($request->has('line_status')) {
-            $query->where('line_status', $request->line_status);
+            $query->havingRaw('MIN(order_date) <= ?', [$request->date_to]);
         }
         if ($request->has('ship_from')) {
             $query->where('ship_from', $request->ship_from);
         }
+        if ($request->has('ship_to')) {
+            $query->where('ship_to', $request->ship_to);
+        }
 
-        $data = $query->select([
+        // Apply status filter in SQL for better performance
+        if ($request->has('status')) {
+            $status = $request->status;
+            $query->havingRaw('CASE
+                WHEN MAX(receipt_date) IS NULL THEN "pending"
+                WHEN MAX(receipt_date) <= MIN(delivery_date) THEN "on_time"
+                WHEN MAX(receipt_date) > MIN(delivery_date) THEN "delayed"
+                ELSE "pending"
+            END = ?', [$status]);
+        }
+
+        $data = $query->orderBy('order_date', 'desc')
+            ->limit($limit)
+            ->get();
+
+        return response()->json($data);
+    }
+
+    /**
+     * Chart 2.9: Warehouse Order Timeline Detail
+     *
+     * Get detailed line items for a specific order
+     * Used for drill-down from Gantt Chart
+     *
+     * @param string $orderNo
+     */
+    public function warehouseOrderTimelineDetail(string $orderNo): JsonResponse
+    {
+        $orderLines = WarehouseOrderLine::where('order_no', $orderNo)
+            ->select([
                 'order_no',
                 'line_no',
                 'order_date',
                 'delivery_date',
                 'receipt_date',
-                'line_status',
                 'item_code',
                 'item_desc',
+                'item_desc2',
                 'order_qty',
-                'ship_qty'
+                'ship_qty',
+                'unit',
+                'line_status_code',
+                'line_status',
+                'ship_from',
+                'ship_from_desc',
+                'ship_to',
+                'ship_to_desc'
             ])
             ->selectRaw('CASE
                 WHEN receipt_date IS NULL THEN "pending"
                 WHEN receipt_date <= delivery_date THEN "on_time"
-                ELSE "delayed"
+                WHEN receipt_date > delivery_date THEN "delayed"
+                ELSE "pending"
             END as delivery_status')
-            ->orderBy('order_date', 'desc')
-            ->limit(100)
+            ->selectRaw('CASE
+                WHEN receipt_date IS NOT NULL AND delivery_date IS NOT NULL
+                THEN DATEDIFF(receipt_date, delivery_date)
+                ELSE NULL
+            END as days_difference')
+            ->selectRaw('CASE
+                WHEN order_qty > 0
+                THEN ROUND((ship_qty / order_qty) * 100, 2)
+                ELSE 0
+            END as fulfillment_rate')
+            ->orderBy('line_no')
             ->get();
 
-        return response()->json($data);
+        if ($orderLines->isEmpty()) {
+            return response()->json([
+                'error' => 'Order not found'
+            ], 404);
+        }
+
+        $orderSummary = [
+            'order_no' => $orderNo,
+            'total_lines' => $orderLines->count(),
+            'total_order_qty' => $orderLines->sum('order_qty'),
+            'total_ship_qty' => $orderLines->sum('ship_qty'),
+            'earliest_order_date' => $orderLines->min('order_date'),
+            'latest_receipt_date' => $orderLines->max('receipt_date'),
+            'overall_status' => $orderLines->contains('delivery_status', 'delayed') ? 'delayed' :
+                               ($orderLines->contains('delivery_status', 'pending') ? 'pending' : 'on_time'),
+            'ship_from' => $orderLines->first()->ship_from,
+            'ship_from_desc' => $orderLines->first()->ship_from_desc,
+            'ship_to' => $orderLines->first()->ship_to,
+            'ship_to_desc' => $orderLines->first()->ship_to_desc,
+        ];
+
+        return response()->json([
+            'order_summary' => $orderSummary,
+            'order_lines' => $orderLines
+        ]);
+    }
+
+    /**
+     * Get filter options for Warehouse Order Timeline
+     * Returns unique values for dropdowns
+     */
+    public function warehouseOrderTimelineFilters(): JsonResponse
+    {
+        $warehouses = DB::table('view_warehouse_order_line')
+            ->select('ship_from', 'ship_from_desc')
+            ->distinct()
+            ->whereNotNull('ship_from')
+            ->orderBy('ship_from')
+            ->get()
+            ->map(function ($item) {
+                return [
+                    'value' => $item->ship_from,
+                    'label' => $item->ship_from_desc ?? $item->ship_from
+                ];
+            });
+
+        $destinations = DB::table('view_warehouse_order_line')
+            ->select('ship_to', 'ship_to_desc')
+            ->distinct()
+            ->whereNotNull('ship_to')
+            ->orderBy('ship_to')
+            ->get()
+            ->map(function ($item) {
+                return [
+                    'value' => $item->ship_to,
+                    'label' => $item->ship_to_desc ?? $item->ship_to
+                ];
+            });
+
+        $statuses = [
+            ['value' => 'on_time', 'label' => 'On Time', 'color' => '#10B981'],
+            ['value' => 'delayed', 'label' => 'Delayed', 'color' => '#EF4444'],
+            ['value' => 'pending', 'label' => 'Pending', 'color' => '#F59E0B']
+        ];
+
+        $dateRange = DB::table('view_warehouse_order_line')
+            ->selectRaw('MIN(order_date) as min_date')
+            ->selectRaw('MAX(order_date) as max_date')
+            ->first();
+
+        return response()->json([
+            'warehouses' => $warehouses,
+            'destinations' => $destinations,
+            'statuses' => $statuses,
+            'date_range' => [
+                'min' => $dateRange->min_date,
+                'max' => $dateRange->max_date
+            ]
+        ]);
     }
 
     /**

@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Models\SoInvoiceLine;
+use App\Models\SoInvoiceLine2;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -14,9 +14,9 @@ class Dashboard4Controller extends ApiController
      */
     public function salesOverviewKpi(Request $request): JsonResponse
     {
-        $period = $request->get('period', 'mtd');
+        $period = $request->get('period', 'ytd');
         
-        $query = SoInvoiceLine::query();
+        $query = SoInvoiceLine2::query();
         
         // Apply period filter
         $this->applyPeriodFilter($query, $period);
@@ -29,7 +29,7 @@ class Dashboard4Controller extends ApiController
             ->count('invoice_no');
 
         // Calculate sales growth (requires previous period comparison)
-        $previousQuery = SoInvoiceLine::query();
+        $previousQuery = SoInvoiceLine2::query();
         $this->applyPeriodFilter($previousQuery, $period, true);
         $previousSalesAmount = $previousQuery->sum('amount_hc');
         
@@ -54,7 +54,7 @@ class Dashboard4Controller extends ApiController
     {
         $groupBy = $request->get('group_by', 'monthly');
         
-        $query = SoInvoiceLine::query();
+        $query = SoInvoiceLine2::query();
 
         // Apply filters
         if ($request->has('customer')) {
@@ -96,7 +96,7 @@ class Dashboard4Controller extends ApiController
     {
         $limit = $request->get('limit', 20);
 
-        $data = SoInvoiceLine::select('bp_name')
+        $data = SoInvoiceLine2::select('bp_name')
             ->selectRaw('SUM(amount_hc) as total_revenue')
             ->selectRaw('COUNT(DISTINCT sales_order) as number_of_orders')
             ->selectRaw('ROUND(AVG(amount_hc), 2) as avg_order_value')
@@ -108,7 +108,7 @@ class Dashboard4Controller extends ApiController
             ->get();
 
         // Calculate revenue contribution percentage
-        $totalRevenue = SoInvoiceLine::sum('amount_hc');
+        $totalRevenue = SoInvoiceLine2::sum('amount_hc');
         $data = $data->map(function ($item) use ($totalRevenue) {
             $item->revenue_contribution = $totalRevenue > 0 
                 ? round(($item->total_revenue / $totalRevenue) * 100, 2) 
@@ -124,7 +124,7 @@ class Dashboard4Controller extends ApiController
      */
     public function salesByProductType(): JsonResponse
     {
-        $data = SoInvoiceLine::select('product_type')
+        $data = SoInvoiceLine2::select('product_type')
             ->selectRaw('SUM(amount_hc) as revenue')
             ->selectRaw('SUM(delivered_qty) as qty_sold')
             ->selectRaw('COUNT(DISTINCT invoice_no) as invoice_count')
@@ -150,16 +150,14 @@ class Dashboard4Controller extends ApiController
 
     /**
      * Chart 4.5: Shipment Status Tracking - Funnel Chart
+     * Note: Receipt data not available in ERP2 database
      */
     public function shipmentStatusTracking(): JsonResponse
     {
-        $salesOrdersCreated = SoInvoiceLine::distinct('sales_order')->count('sales_order');
-        $shipmentsGenerated = SoInvoiceLine::distinct('shipment')->count('shipment');
-        $receiptsConfirmed = SoInvoiceLine::whereNotNull('receipt')
-            ->distinct('receipt')
-            ->count('receipt');
-        $invoicesIssued = SoInvoiceLine::distinct('invoice_no')->count('invoice_no');
-        $invoicesPaid = SoInvoiceLine::where('invoice_status', 'Paid')
+        $salesOrdersCreated = SoInvoiceLine2::distinct('sales_order')->count('sales_order');
+        $shipmentsGenerated = SoInvoiceLine2::distinct('shipment')->count('shipment');
+        $invoicesIssued = SoInvoiceLine2::distinct('invoice_no')->count('invoice_no');
+        $invoicesPaid = SoInvoiceLine2::where('invoice_status', 'Paid')
             ->distinct('invoice_no')
             ->count('invoice_no');
 
@@ -168,11 +166,8 @@ class Dashboard4Controller extends ApiController
             'sales_to_shipment' => $salesOrdersCreated > 0 
                 ? round(($shipmentsGenerated / $salesOrdersCreated) * 100, 2) 
                 : 0,
-            'shipment_to_receipt' => $shipmentsGenerated > 0 
-                ? round(($receiptsConfirmed / $shipmentsGenerated) * 100, 2) 
-                : 0,
-            'receipt_to_invoice' => $receiptsConfirmed > 0 
-                ? round(($invoicesIssued / $receiptsConfirmed) * 100, 2) 
+            'shipment_to_invoice' => $shipmentsGenerated > 0 
+                ? round(($invoicesIssued / $shipmentsGenerated) * 100, 2) 
                 : 0,
             'invoice_to_paid' => $invoicesIssued > 0 
                 ? round(($invoicesPaid / $invoicesIssued) * 100, 2) 
@@ -183,7 +178,6 @@ class Dashboard4Controller extends ApiController
             'stages' => [
                 'sales_orders_created' => $salesOrdersCreated,
                 'shipments_generated' => $shipmentsGenerated,
-                'receipts_confirmed' => $receiptsConfirmed,
                 'invoices_issued' => $invoicesIssued,
                 'invoices_paid' => $invoicesPaid
             ],
@@ -193,26 +187,27 @@ class Dashboard4Controller extends ApiController
 
     /**
      * Chart 4.6: Delivery Performance - Gauge Chart
+     * Note: Using invoice_date vs delivery_date comparison (receipt_date not available in ERP2)
      */
     public function deliveryPerformance(): JsonResponse
     {
-        $totalDeliveries = SoInvoiceLine::whereNotNull('receipt_date')
+        $totalDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
             ->whereNotNull('delivery_date')
             ->count();
 
-        $earlyDeliveries = SoInvoiceLine::whereNotNull('receipt_date')
+        $earlyDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
             ->whereNotNull('delivery_date')
-            ->whereRaw('receipt_date < delivery_date')
+            ->whereRaw('invoice_date < delivery_date')
             ->count();
 
-        $onTimeDeliveries = SoInvoiceLine::whereNotNull('receipt_date')
+        $onTimeDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
             ->whereNotNull('delivery_date')
-            ->whereRaw('receipt_date = delivery_date')
+            ->whereRaw('invoice_date = delivery_date')
             ->count();
 
-        $lateDeliveries = SoInvoiceLine::whereNotNull('receipt_date')
+        $lateDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
             ->whereNotNull('delivery_date')
-            ->whereRaw('receipt_date > delivery_date')
+            ->whereRaw('invoice_date > delivery_date')
             ->count();
 
         $earlyPercentage = $totalDeliveries > 0 
@@ -244,7 +239,7 @@ class Dashboard4Controller extends ApiController
     {
         $groupBy = $request->get('group_by', 'monthly');
         
-        $query = SoInvoiceLine::query();
+        $query = SoInvoiceLine2::query();
 
         // Group by period or customer
         if ($groupBy === 'customer') {
@@ -274,7 +269,7 @@ class Dashboard4Controller extends ApiController
     {
         $groupBy = $request->get('group_by', 'period');
         
-        $query = SoInvoiceLine::query();
+        $query = SoInvoiceLine2::query();
 
         if ($groupBy === 'product_type') {
             $data = $query->select('product_type as category')
@@ -304,7 +299,7 @@ class Dashboard4Controller extends ApiController
     {
         $limit = $request->get('limit', 50);
         
-        $query = SoInvoiceLine::query();
+        $query = SoInvoiceLine2::query();
 
         // Apply filters
         if ($request->has('product_type')) {
@@ -344,7 +339,7 @@ class Dashboard4Controller extends ApiController
      */
     public function revenueByCurrency(): JsonResponse
     {
-        $data = SoInvoiceLine::select('currency')
+        $data = SoInvoiceLine2::select('currency')
             ->selectRaw('SUM(amount) as amount_original')
             ->selectRaw('SUM(amount_hc) as amount_hc')
             ->selectRaw('COUNT(DISTINCT invoice_no) as invoice_count')
@@ -377,7 +372,7 @@ class Dashboard4Controller extends ApiController
         $previousYear = $currentYear - 1;
 
         // Apply filters
-        $query = SoInvoiceLine::query();
+        $query = SoInvoiceLine2::query();
         
         if ($request->has('product_type')) {
             $query->where('product_type', $request->product_type);

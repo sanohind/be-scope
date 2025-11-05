@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\WarehouseOrderController;
 use App\Http\Controllers\Api\WarehouseOrderLineController;
 use App\Http\Controllers\Api\ProdHeaderController;
 use App\Http\Controllers\Api\SoInvoiceLineController;
+use App\Http\Controllers\Api\SoInvoiceLine2Controller;
 use App\Http\Controllers\Api\ReceiptPurchaseController;
 use App\Http\Controllers\Api\SyncLogController;
 use App\Http\Controllers\Api\Dashboard1Controller;
@@ -41,6 +42,7 @@ Route::apiResources([
     'warehouse-order-lines' => WarehouseOrderLineController::class,
     'production-headers' => ProdHeaderController::class,
     'invoice-lines' => SoInvoiceLineController::class,
+    'invoice-lines-2' => SoInvoiceLine2Controller::class,
     'receipt-purchases' => ReceiptPurchaseController::class,
     'sync-logs' => SyncLogController::class,
 ], ['only' => ['index', 'show']]);
@@ -74,6 +76,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/stock-by-customer', [Dashboard1Controller::class, 'stockByCustomer']);
         Route::get('/inventory-availability-vs-demand', [Dashboard1Controller::class, 'inventoryAvailabilityVsDemand']);
         Route::get('/stock-movement-trend', [Dashboard1Controller::class, 'stockMovementTrend']);
+        Route::get('/debug-stock-count', [Dashboard1Controller::class, 'debugStockCount']);
         Route::get('/all-data', [Dashboard1Controller::class, 'getAllData']);
     });
 
@@ -87,6 +90,8 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/order-fulfillment-rate', [Dashboard2Controller::class, 'orderFulfillmentRate']);
         Route::get('/top-items-moved', [Dashboard2Controller::class, 'topItemsMoved']);
         Route::get('/order-timeline', [Dashboard2Controller::class, 'warehouseOrderTimeline']);
+        Route::get('/order-timeline/filters', [Dashboard2Controller::class, 'warehouseOrderTimelineFilters']);
+        Route::get('/order-timeline/{orderNo}', [Dashboard2Controller::class, 'warehouseOrderTimelineDetail']);
         Route::get('/all-data', [Dashboard2Controller::class, 'getAllData']);
     });
 
@@ -100,7 +105,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/outstanding-analysis', [Dashboard3Controller::class, 'productionOutstandingAnalysis']);
         Route::get('/by-division', [Dashboard3Controller::class, 'productionByDivision']);
         Route::get('/trend', [Dashboard3Controller::class, 'productionTrend']);
-        Route::get('/by-warehouse', [Dashboard3Controller::class, 'productionByWarehouse']);
+        Route::get('/outstanding-trend', [Dashboard3Controller::class, 'outstandingTrend']);
         Route::get('/all-data', [Dashboard3Controller::class, 'getAllData']);
     });
 

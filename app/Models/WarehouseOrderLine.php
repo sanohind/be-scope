@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class WarehouseOrderLine extends Model
 {
+    protected $connection = 'erp';
     protected $table = 'view_warehouse_order_line';
     public $timestamps = false;
 

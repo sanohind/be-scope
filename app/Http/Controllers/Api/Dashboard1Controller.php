@@ -14,19 +14,39 @@ class Dashboard1Controller extends ApiController
      */
     public function stockLevelOverview(): JsonResponse
     {
-        $totalOnhand = StockByWh::sum('onhand');
+        $warehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
 
-        $itemsBelowSafetyStock = StockByWh::whereRaw('onhand < safety_stock')
-            ->distinct('partno')
+        // Use DB::connection to ensure we're using the ERP database
+        $totalItems = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->whereNotNull('partno')
+            ->distinct()
             ->count('partno');
 
-        $itemsAboveMaxStock = StockByWh::whereRaw('onhand > max_stock')
-            ->distinct('partno')
+        $baseQuery = StockByWh::whereIn('warehouse', $warehouses);
+
+        // Count distinct items that have onhand > 0
+        $totalOnhand = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->where('onhand', '>', 0)
+            ->distinct()
             ->count('partno');
 
-        $totalItems = StockByWh::distinct('partno')->count('partno');
+        $itemsBelowSafetyStock = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->whereNotNull('partno')
+            ->whereRaw('onhand < safety_stock')
+            ->distinct()
+            ->count('partno');
 
-        $avgStockLevel = StockByWh::avg('onhand');
+        $itemsAboveMaxStock = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->whereNotNull('partno')
+            ->whereRaw('onhand > max_stock')
+            ->distinct()
+            ->count('partno');
+
+        $avgStockLevel = (clone $baseQuery)->avg('onhand');
 
         return response()->json([
             'total_onhand' => $totalOnhand,
@@ -103,6 +123,7 @@ class Dashboard1Controller extends ApiController
                 'max_stock',
                 'location'
             ])
+            ->whereIn('warehouse', ['WHRM01', 'WHRM02', 'WHFG01', 'WHFG02', 'WHMT01'])
             ->selectRaw('(safety_stock - onhand) as gap')
             ->orderByRaw('(safety_stock - onhand) DESC')
             ->limit(20)
@@ -125,6 +146,7 @@ class Dashboard1Controller extends ApiController
                 'allocated'
             ])
             ->selectRaw('(onhand - allocated) as available')
+            ->whereIn('warehouse', ['WHRM01', 'WHRM02', 'WHFG01', 'WHFG02', 'WHMT01'])
             ->orderBy('onhand', 'desc')
             ->get()
             ->groupBy(['product_type', 'model']);
@@ -137,9 +159,12 @@ class Dashboard1Controller extends ApiController
      */
     public function stockByCustomer(): JsonResponse
     {
+        $query = StockByWh::query();
+        
         $data = StockByWh::select('customer')
             ->selectRaw('SUM(onhand) as total_onhand')
             ->selectRaw('COUNT(DISTINCT partno) as total_items')
+            ->whereIn('warehouse', ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'])
             ->groupBy('customer')
             ->orderBy('total_onhand', 'desc')
             ->get();
@@ -159,11 +184,13 @@ class Dashboard1Controller extends ApiController
      */
     public function inventoryAvailabilityVsDemand(Request $request): JsonResponse
     {
-        $groupBy = $request->get('group_by', 'warehouse'); // warehouse or product_group
+        $groupBy = $request->get('group_by', 'warehouse'); 
 
         $query = StockByWh::query();
 
+        // Filter hanya warehouse tertentu
         if ($groupBy === 'warehouse') {
+            $query->whereIn('warehouse', ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02']);
             $query->groupBy('warehouse');
         } else {
             $query->groupBy('group');
@@ -173,7 +200,7 @@ class Dashboard1Controller extends ApiController
             ->selectRaw('SUM(onhand) as total_onhand')
             ->selectRaw('SUM(allocated) as total_allocated')
             ->selectRaw('SUM(onorder) as total_onorder')
-            ->selectRaw('ROUND(((SUM(onhand) - SUM(allocated)) / SUM(onhand)) * 100, 2) as available_percentage')
+            ->selectRaw('((SUM(onhand) - SUM(allocated)) + SUM(onorder)) as available_to_promise')
             ->get();
 
         return response()->json($data);
@@ -187,16 +214,24 @@ class Dashboard1Controller extends ApiController
     {
         // This would typically require a separate table with historical snapshots
         // For now, returning current data structure
+        $warehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+        
         $query = StockByWh::query();
+        
+        // Filter by specified warehouses
+        $query->whereIn('warehouse', $warehouses);
 
+        // Allow specific warehouse override if provided in request
         if ($request->has('warehouse')) {
             $query->where('warehouse', $request->warehouse);
         }
+        
         if ($request->has('product_type')) {
             $query->where('product_type', $request->product_type);
         }
 
         $data = $query->select([
+                'warehouse',
                 'partno',
                 'desc',
                 'onhand',
@@ -207,7 +242,58 @@ class Dashboard1Controller extends ApiController
 
         return response()->json([
             'message' => 'Historical data required for trend analysis',
+            'warehouses_filtered' => $warehouses,
+            'total_records' => $data->count(),
             'current_data' => $data
+        ]);
+    }
+
+    /**
+     * Debug endpoint to check query and data
+     */
+    public function debugStockCount(): JsonResponse
+    {
+        $warehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+
+        // Method 1: Using distinct()->count() with ERP connection
+        $method1 = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->whereNotNull('partno')
+            ->distinct()
+            ->count('partno');
+
+        // Method 2: Using selectRaw with COUNT(DISTINCT) with ERP connection
+        $method2 = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->selectRaw('COUNT(DISTINCT partno) as total')
+            ->value('total');
+
+        // Method 3: Check if there are NULL values
+        $nullCount = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->whereNull('partno')
+            ->count();
+
+        // Method 4: Check total rows
+        $totalRows = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->count();
+
+        // Get sample of partno values to check for whitespace or special characters
+        $samplePartno = DB::connection('erp')->table('stockbywh')
+            ->whereIn('warehouse', $warehouses)
+            ->select('partno')
+            ->distinct()
+            ->limit(10)
+            ->pluck('partno');
+
+        return response()->json([
+            'method1_distinct_count' => $method1,
+            'method2_count_distinct' => $method2,
+            'null_partno_count' => $nullCount,
+            'total_rows' => $totalRows,
+            'sample_partno' => $samplePartno,
+            'difference' => 6034 - $method2
         ]);
     }
 
