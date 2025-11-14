@@ -426,7 +426,7 @@ class Dashboard8Controller extends ApiController
 
         // Finance Alerts
         $overdueAr = SoInvoiceLine::where('invoice_status', '<>', 'Paid')
-            ->whereRaw('DATEDIFF(CURDATE(), invoice_date) > 90')
+            ->whereRaw('DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) > 90')
             ->limit(5)
             ->get();
         

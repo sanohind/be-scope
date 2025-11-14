@@ -20,17 +20,17 @@ class Dashboard6Controller extends ApiController
         // Order to Cash Cycle Time
         $orderToCashCycleTime = SoInvoiceLine::whereNotNull('invoice_date')
             ->whereNotNull('so_date')
-            ->selectRaw('AVG(DATEDIFF(invoice_date, so_date)) as avg_cycle_time')
+            ->selectRaw('AVG(DATEDIFF(day, so_date, invoice_date)) as avg_cycle_time')
             ->value('avg_cycle_time') ?? 0;
 
         // Procure to Pay Cycle Time
         $procureToPayCycleTime = ReceiptPurchase::whereNotNull('payment_doc_date')
-            ->selectRaw('AVG(DATEDIFF(payment_doc_date, actual_receipt_date)) as avg_cycle_time')
+            ->selectRaw('AVG(DATEDIFF(day, actual_receipt_date, payment_doc_date)) as avg_cycle_time')
             ->value('avg_cycle_time') ?? 0;
 
         // Average Production Lead Time
         $avgProductionLeadTime = ProdHeader::whereNotNull('planning_date')
-            ->selectRaw('AVG(DATEDIFF(planning_date, planning_date)) as avg_lead_time')
+            ->selectRaw('AVG(DATEDIFF(day, planning_date, planning_date)) as avg_lead_time')
             ->value('avg_lead_time') ?? 0;
 
         // Stock Availability Rate
@@ -38,16 +38,16 @@ class Dashboard6Controller extends ApiController
         $itemsAboveSafetyStock = StockByWh::whereRaw('onhand > safety_stock')
             ->distinct('partno')
             ->count('partno');
-        
-        $stockAvailabilityRate = $totalItems > 0 
-            ? round(($itemsAboveSafetyStock / $totalItems) * 100, 2) 
+
+        $stockAvailabilityRate = $totalItems > 0
+            ? round(($itemsAboveSafetyStock / $totalItems) * 100, 2)
             : 0;
 
         // Supply Chain Cost Efficiency (simplified calculation)
         $totalCost = ReceiptPurchase::sum('receipt_amount');
         $totalOutput = SoInvoiceLine::sum('amount_hc');
-        $costEfficiency = $totalOutput > 0 
-            ? round(($totalCost / $totalOutput) * 100, 2) 
+        $costEfficiency = $totalOutput > 0
+            ? round(($totalCost / $totalOutput) * 100, 2)
             : 0;
 
         return response()->json([
@@ -208,15 +208,30 @@ class Dashboard6Controller extends ApiController
             ]);
         } else {
             // Time period analysis
-            $dateFormat = "DATE_FORMAT(planning_date, '%Y-%m')";
-            
-            $data = ProdHeader::selectRaw("$dateFormat as period")
+            $period = $request->get('period', 'monthly');
+
+            // Validate period
+            if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+                $period = 'monthly';
+            }
+
+            $query = ProdHeader::query();
+
+            // Apply date range filter
+            $this->applyDateRangeFilter($query, $request, 'planning_date');
+
+            $dateFormat = $this->getDateFormatByPeriod($period, 'planning_date', $query);
+
+            $data = $query->selectRaw("$dateFormat as period")
                 ->selectRaw('SUM(qty_order) as production_plan')
                 ->groupByRaw($dateFormat)
                 ->orderByRaw($dateFormat)
                 ->get();
 
-            return response()->json($data);
+            return response()->json([
+                'data' => $data,
+                'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            ]);
         }
     }
 
@@ -226,21 +241,21 @@ class Dashboard6Controller extends ApiController
     public function leadTimeAnalysis(Request $request): JsonResponse
     {
         // Procurement Lead Time
-        $procurementLeadTimes = ReceiptPurchase::selectRaw('DATEDIFF(actual_receipt_date, actual_receipt_date) as lead_time')
+        $procurementLeadTimes = ReceiptPurchase::selectRaw('DATEDIFF(day, actual_receipt_date, actual_receipt_date) as lead_time')
             ->whereNotNull('actual_receipt_date')
             ->pluck('lead_time')
             ->sort()
             ->values();
 
         // Production Lead Time
-        $productionLeadTimes = ProdHeader::selectRaw('DATEDIFF(planning_date, planning_date) as lead_time')
+        $productionLeadTimes = ProdHeader::selectRaw('DATEDIFF(day, planning_date, planning_date) as lead_time')
             ->whereNotNull('planning_date')
             ->pluck('lead_time')
             ->sort()
             ->values();
 
         // Delivery Lead Time
-        $deliveryLeadTimes = SoInvoiceLine::selectRaw('DATEDIFF(receipt_date, delivery_date) as lead_time')
+        $deliveryLeadTimes = SoInvoiceLine::selectRaw('DATEDIFF(day, delivery_date, receipt_date) as lead_time')
             ->whereNotNull('receipt_date')
             ->whereNotNull('delivery_date')
             ->pluck('lead_time')
@@ -341,8 +356,8 @@ class Dashboard6Controller extends ApiController
 
         $data = $data->map(function ($item, $index) use ($totalStockouts, &$cumulative) {
             $cumulative += $item->stockout_frequency;
-            $item->cumulative_percentage = $totalStockouts > 0 
-                ? round(($cumulative / $totalStockouts) * 100, 2) 
+            $item->cumulative_percentage = $totalStockouts > 0
+                ? round(($cumulative / $totalStockouts) * 100, 2)
                 : 0;
             $item->rank = $index + 1;
             return $item;
@@ -356,32 +371,54 @@ class Dashboard6Controller extends ApiController
 
     /**
      * Chart 6.8: Supply Chain Cycle Time Trend - Line Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (for all date fields)
+     * - date_to: End date filter (for all date fields)
      */
     public function supplyChainCycleTimeTrend(Request $request): JsonResponse
     {
-        $dateFormat = "DATE_FORMAT(actual_receipt_date, '%Y-%m')";
+        $period = $request->get('period', 'monthly');
+
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'monthly';
+        }
+
+        // Get date format based on period
+        $procurementDateFormat = $this->getDateFormatByPeriod($period, 'actual_receipt_date', null);
+        $productionDateFormat = $this->getDateFormatByPeriod($period, 'planning_date', null);
+        $deliveryDateFormat = $this->getDateFormatByPeriod($period, 'invoice_date', null);
 
         // Procurement Cycle Time Trend
-        $procurementTrend = ReceiptPurchase::selectRaw("$dateFormat as period")
-            ->selectRaw('AVG(DATEDIFF(actual_receipt_date, actual_receipt_date)) as procurement_cycle_time')
-            ->groupByRaw($dateFormat)
-            ->orderByRaw($dateFormat)
+        $procurementQuery = ReceiptPurchase::query();
+        $this->applyDateRangeFilter($procurementQuery, $request, 'actual_receipt_date');
+
+        $procurementTrend = $procurementQuery->selectRaw("$procurementDateFormat as period")
+            ->selectRaw('AVG(DATEDIFF(day, actual_receipt_date, actual_receipt_date)) as procurement_cycle_time')
+            ->groupByRaw($procurementDateFormat)
+            ->orderByRaw($procurementDateFormat)
             ->get()
             ->keyBy('period');
 
         // Production Cycle Time Trend
-        $productionDateFormat = "DATE_FORMAT(planning_date, '%Y-%m')";
-        $productionTrend = ProdHeader::selectRaw("$productionDateFormat as period")
-            ->selectRaw('AVG(DATEDIFF(planning_date, planning_date)) as production_cycle_time')
+        $productionQuery = ProdHeader::query();
+        $this->applyDateRangeFilter($productionQuery, $request, 'planning_date');
+
+        $productionTrend = $productionQuery->selectRaw("$productionDateFormat as period")
+            ->selectRaw('AVG(DATEDIFF(day, planning_date, planning_date)) as production_cycle_time')
             ->groupByRaw($productionDateFormat)
             ->orderByRaw($productionDateFormat)
             ->get()
             ->keyBy('period');
 
         // Delivery Cycle Time Trend
-        $deliveryDateFormat = "DATE_FORMAT(invoice_date, '%Y-%m')";
-        $deliveryTrend = SoInvoiceLine::selectRaw("$deliveryDateFormat as period")
-            ->selectRaw('AVG(DATEDIFF(receipt_date, delivery_date)) as delivery_cycle_time')
+        $deliveryQuery = SoInvoiceLine::query();
+        $this->applyDateRangeFilter($deliveryQuery, $request, 'invoice_date');
+
+        $deliveryTrend = $deliveryQuery->selectRaw("$deliveryDateFormat as period")
+            ->selectRaw('AVG(DATEDIFF(day, delivery_date, receipt_date)) as delivery_cycle_time')
             ->whereNotNull('receipt_date')
             ->whereNotNull('delivery_date')
             ->groupByRaw($deliveryDateFormat)
@@ -415,7 +452,10 @@ class Dashboard6Controller extends ApiController
             ];
         });
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'multiple')
+        ]);
     }
 
     /**

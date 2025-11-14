@@ -16,19 +16,19 @@ class Dashboard7Controller extends ApiController
     public function financialKpi(Request $request): JsonResponse
     {
         $period = $request->get('period', 'mtd');
-        
+
         $salesQuery = SoInvoiceLine::query();
         $costQuery = ReceiptPurchase::query();
-        
+
         // Apply period filter
         $this->applyPeriodFilter($salesQuery, $period, 'invoice_date');
         $this->applyPeriodFilter($costQuery, $period, 'actual_receipt_date');
 
         $totalRevenue = $salesQuery->sum('amount_hc');
         $totalCost = $costQuery->sum('receipt_amount');
-        
-        $grossMargin = $totalRevenue > 0 
-            ? round((($totalRevenue - $totalCost) / $totalRevenue) * 100, 2) 
+
+        $grossMargin = $totalRevenue > 0
+            ? round((($totalRevenue - $totalCost) / $totalRevenue) * 100, 2)
             : 0;
 
         // Outstanding AR
@@ -41,8 +41,8 @@ class Dashboard7Controller extends ApiController
 
         // DSO (Days Sales Outstanding)
         $avgDailySales = $totalRevenue / 30; // Simplified calculation
-        $dso = $avgDailySales > 0 
-            ? round($outstandingAr / $avgDailySales, 2) 
+        $dso = $avgDailySales > 0
+            ? round($outstandingAr / $avgDailySales, 2)
             : 0;
 
         return response()->json([
@@ -58,17 +58,31 @@ class Dashboard7Controller extends ApiController
 
     /**
      * Chart 7.2: Revenue vs Cost Trend - Combo Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - group_by: Alias for period parameter
+     * - date_from: Start date filter
+     * - date_to: End date filter
      */
     public function revenueVsCostTrend(Request $request): JsonResponse
     {
-        $groupBy = $request->get('group_by', 'monthly');
-        
-        $dateFormat = $groupBy === 'quarterly' 
-            ? "CONCAT(YEAR(invoice_date), '-Q', QUARTER(invoice_date))"
-            : "DATE_FORMAT(invoice_date, '%Y-%m')";
+        $period = $request->get('period', $request->get('group_by', 'monthly'));
+
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'monthly';
+        }
+
+        // Get date format based on period
+        $dateFormat = $this->getDateFormatByPeriod($period, 'invoice_date', null);
+        $costDateFormat = $this->getDateFormatByPeriod($period, 'actual_receipt_date', null);
 
         // Revenue trend
-        $revenueTrend = SoInvoiceLine::selectRaw("$dateFormat as period")
+        $revenueQuery = SoInvoiceLine::query();
+        $this->applyDateRangeFilter($revenueQuery, $request, 'invoice_date');
+
+        $revenueTrend = $revenueQuery->selectRaw("$dateFormat as period")
             ->selectRaw('SUM(amount_hc) as revenue')
             ->groupByRaw($dateFormat)
             ->orderByRaw($dateFormat)
@@ -76,11 +90,10 @@ class Dashboard7Controller extends ApiController
             ->keyBy('period');
 
         // Cost trend
-        $costDateFormat = $groupBy === 'quarterly' 
-            ? "CONCAT(YEAR(actual_receipt_date), '-Q', QUARTER(actual_receipt_date))"
-            : "DATE_FORMAT(actual_receipt_date, '%Y-%m')";
+        $costQuery = ReceiptPurchase::query();
+        $this->applyDateRangeFilter($costQuery, $request, 'actual_receipt_date');
 
-        $costTrend = ReceiptPurchase::selectRaw("$costDateFormat as period")
+        $costTrend = $costQuery->selectRaw("$costDateFormat as period")
             ->selectRaw('SUM(receipt_amount) as cost')
             ->groupByRaw($costDateFormat)
             ->orderByRaw($costDateFormat)
@@ -101,8 +114,8 @@ class Dashboard7Controller extends ApiController
             $revenueAmount = $revenue->revenue ?? 0;
             $costAmount = $cost->cost ?? 0;
 
-            $grossMarginPercent = $revenueAmount > 0 
-                ? round((($revenueAmount - $costAmount) / $revenueAmount) * 100, 2) 
+            $grossMarginPercent = $revenueAmount > 0
+                ? round((($revenueAmount - $costAmount) / $revenueAmount) * 100, 2)
                 : 0;
 
             return [
@@ -115,24 +128,38 @@ class Dashboard7Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'target_margin' => 25
+            'target_margin' => 25,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'multiple')
         ]);
     }
 
     /**
      * Chart 7.3: Revenue by Customer Segment - Stacked Bar Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - group_by: Alias for period parameter
+     * - top_customers: Number of top customers to show (default: 10)
+     * - date_from: Start date filter (invoice_date)
+     * - date_to: End date filter (invoice_date)
      */
     public function revenueByCustomerSegment(Request $request): JsonResponse
     {
-        $groupBy = $request->get('group_by', 'monthly');
+        $period = $request->get('period', $request->get('group_by', 'monthly'));
         $topCustomersLimit = $request->get('top_customers', 10);
 
-        $dateFormat = $groupBy === 'quarterly' 
-            ? "CONCAT(YEAR(invoice_date), '-Q', QUARTER(invoice_date))"
-            : "DATE_FORMAT(invoice_date, '%Y-%m')";
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'monthly';
+        }
+
+        $dateFormat = $this->getDateFormatByPeriod($period, 'invoice_date', null);
 
         // Get top customers
-        $topCustomers = SoInvoiceLine::select('bp_name')
+        $topCustomersQuery = SoInvoiceLine::query();
+        $this->applyDateRangeFilter($topCustomersQuery, $request, 'invoice_date');
+
+        $topCustomers = $topCustomersQuery->select('bp_name')
             ->selectRaw('SUM(amount_hc) as total_revenue')
             ->groupBy('bp_name')
             ->orderBy('total_revenue', 'desc')
@@ -140,7 +167,10 @@ class Dashboard7Controller extends ApiController
             ->pluck('bp_name');
 
         // Get revenue by period and customer
-        $data = SoInvoiceLine::selectRaw("$dateFormat as period")
+        $query = SoInvoiceLine::query();
+        $this->applyDateRangeFilter($query, $request, 'invoice_date');
+
+        $data = $query->selectRaw("$dateFormat as period")
             ->selectRaw("CASE WHEN bp_name IN ('" . $topCustomers->implode("','") . "') THEN bp_name ELSE 'Others' END as customer")
             ->selectRaw('SUM(amount_hc) as revenue')
             ->groupByRaw($dateFormat)
@@ -148,7 +178,10 @@ class Dashboard7Controller extends ApiController
             ->orderByRaw($dateFormat)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date')
+        ]);
     }
 
     /**
@@ -198,8 +231,8 @@ class Dashboard7Controller extends ApiController
             $avgCost = $cost->avg_purchase_cost ?? 0;
             $avgPrice = $item->avg_sales_price ?? 0;
 
-            $marginPercent = $avgPrice > 0 
-                ? round((($avgPrice - $avgCost) / $avgPrice) * 100, 2) 
+            $marginPercent = $avgPrice > 0
+                ? round((($avgPrice - $avgCost) / $avgPrice) * 100, 2)
                 : 0;
 
             return [
@@ -222,11 +255,11 @@ class Dashboard7Controller extends ApiController
     {
         $data = SoInvoiceLine::select('bp_name')
             ->selectRaw("
-                SUM(CASE WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 0 AND 30 THEN amount_hc ELSE 0 END) as current_0_30,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 31 AND 60 THEN amount_hc ELSE 0 END) as overdue_31_60,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 61 AND 90 THEN amount_hc ELSE 0 END) as overdue_61_90,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 91 AND 120 THEN amount_hc ELSE 0 END) as overdue_91_120,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), invoice_date) > 120 THEN amount_hc ELSE 0 END) as overdue_over_120,
+                SUM(CASE WHEN DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) BETWEEN 0 AND 30 THEN amount_hc ELSE 0 END) as current_0_30,
+                SUM(CASE WHEN DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) BETWEEN 31 AND 60 THEN amount_hc ELSE 0 END) as overdue_31_60,
+                SUM(CASE WHEN DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) BETWEEN 61 AND 90 THEN amount_hc ELSE 0 END) as overdue_61_90,
+                SUM(CASE WHEN DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) BETWEEN 91 AND 120 THEN amount_hc ELSE 0 END) as overdue_91_120,
+                SUM(CASE WHEN DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) > 120 THEN amount_hc ELSE 0 END) as overdue_over_120,
                 SUM(amount_hc) as total_outstanding
             ")
             ->where('invoice_status', '<>', 'Paid')
@@ -245,11 +278,11 @@ class Dashboard7Controller extends ApiController
     {
         $data = ReceiptPurchase::select('bp_name')
             ->selectRaw("
-                SUM(CASE WHEN inv_due_date > CURDATE() THEN inv_amount ELSE 0 END) as not_yet_due,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), inv_due_date) BETWEEN 0 AND 30 THEN inv_amount ELSE 0 END) as current_0_30,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), inv_due_date) BETWEEN 31 AND 60 THEN inv_amount ELSE 0 END) as overdue_31_60,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), inv_due_date) BETWEEN 61 AND 90 THEN inv_amount ELSE 0 END) as overdue_61_90,
-                SUM(CASE WHEN DATEDIFF(CURDATE(), inv_due_date) > 90 THEN inv_amount ELSE 0 END) as overdue_over_90,
+                SUM(CASE WHEN inv_due_date > CAST(GETDATE() AS DATE) THEN inv_amount ELSE 0 END) as not_yet_due,
+                SUM(CASE WHEN DATEDIFF(day, inv_due_date, CAST(GETDATE() AS DATE)) BETWEEN 0 AND 30 THEN inv_amount ELSE 0 END) as current_0_30,
+                SUM(CASE WHEN DATEDIFF(day, inv_due_date, CAST(GETDATE() AS DATE)) BETWEEN 31 AND 60 THEN inv_amount ELSE 0 END) as overdue_31_60,
+                SUM(CASE WHEN DATEDIFF(day, inv_due_date, CAST(GETDATE() AS DATE)) BETWEEN 61 AND 90 THEN inv_amount ELSE 0 END) as overdue_61_90,
+                SUM(CASE WHEN DATEDIFF(day, inv_due_date, CAST(GETDATE() AS DATE)) > 90 THEN inv_amount ELSE 0 END) as overdue_over_90,
                 SUM(inv_amount) as total_outstanding
             ")
             ->whereNull('payment_doc')
@@ -269,32 +302,32 @@ class Dashboard7Controller extends ApiController
         // Expected receipts by time bucket
         $expectedReceipts = [
             'current' => SoInvoiceLine::where('invoice_status', '<>', 'Paid')
-                ->whereRaw('DATEDIFF(CURDATE(), invoice_date) <= 30')
+                ->whereRaw('DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) <= 30')
                 ->sum('amount_hc'),
             'next_30_days' => SoInvoiceLine::where('invoice_status', '<>', 'Paid')
-                ->whereRaw('DATEDIFF(CURDATE(), invoice_date) BETWEEN 31 AND 60')
+                ->whereRaw('DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) BETWEEN 31 AND 60')
                 ->sum('amount_hc'),
             'next_31_60_days' => SoInvoiceLine::where('invoice_status', '<>', 'Paid')
-                ->whereRaw('DATEDIFF(CURDATE(), invoice_date) BETWEEN 61 AND 90')
+                ->whereRaw('DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) BETWEEN 61 AND 90')
                 ->sum('amount_hc'),
             'next_61_90_days' => SoInvoiceLine::where('invoice_status', '<>', 'Paid')
-                ->whereRaw('DATEDIFF(CURDATE(), invoice_date) > 90')
+                ->whereRaw('DATEDIFF(day, invoice_date, CAST(GETDATE() AS DATE)) > 90')
                 ->sum('amount_hc')
         ];
 
         // Expected payments by time bucket
         $expectedPayments = [
             'current' => ReceiptPurchase::whereNull('payment_doc')
-                ->whereRaw('DATEDIFF(CURDATE(), inv_due_date) <= 0')
+                ->whereRaw('DATEDIFF(day, inv_due_date, CAST(GETDATE() AS DATE)) <= 0')
                 ->sum('inv_amount'),
             'next_30_days' => ReceiptPurchase::whereNull('payment_doc')
-                ->whereRaw('DATEDIFF(inv_due_date, CURDATE()) BETWEEN 1 AND 30')
+                ->whereRaw('DATEDIFF(day, CAST(GETDATE() AS DATE), inv_due_date) BETWEEN 1 AND 30')
                 ->sum('inv_amount'),
             'next_31_60_days' => ReceiptPurchase::whereNull('payment_doc')
-                ->whereRaw('DATEDIFF(inv_due_date, CURDATE()) BETWEEN 31 AND 60')
+                ->whereRaw('DATEDIFF(day, CAST(GETDATE() AS DATE), inv_due_date) BETWEEN 31 AND 60')
                 ->sum('inv_amount'),
             'next_61_90_days' => ReceiptPurchase::whereNull('payment_doc')
-                ->whereRaw('DATEDIFF(inv_due_date, CURDATE()) > 60')
+                ->whereRaw('DATEDIFF(day, CAST(GETDATE() AS DATE), inv_due_date) > 60')
                 ->sum('inv_amount')
         ];
 
@@ -343,8 +376,8 @@ class Dashboard7Controller extends ApiController
             $revenue = $item->revenue;
 
             $grossMargin = $revenue - $costAmount;
-            $marginPercent = $revenue > 0 
-                ? round(($grossMargin / $revenue) * 100, 2) 
+            $marginPercent = $revenue > 0
+                ? round(($grossMargin / $revenue) * 100, 2)
                 : 0;
 
             $totalProfit += $grossMargin;
@@ -366,10 +399,10 @@ class Dashboard7Controller extends ApiController
         // Add contribution percentage
         $data = $data->map(function ($item, $index) use ($totalProfit) {
             $item['rank'] = $index + 1;
-            $item['contribution_percent'] = $totalProfit > 0 
-                ? round(($item['gross_margin'] / $totalProfit) * 100, 2) 
+            $item['contribution_percent'] = $totalProfit > 0
+                ? round(($item['gross_margin'] / $totalProfit) * 100, 2)
                 : 0;
-            
+
             // Add conditional formatting status
             if ($item['margin_percent'] > 30) {
                 $item['status'] = 'green';
@@ -378,7 +411,7 @@ class Dashboard7Controller extends ApiController
             } else {
                 $item['status'] = 'red';
             }
-            
+
             return $item;
         });
 
@@ -390,9 +423,10 @@ class Dashboard7Controller extends ApiController
      */
     public function revenueByCurrencyExchangeImpact(): JsonResponse
     {
-        $dateFormat = "DATE_FORMAT(invoice_date, '%Y-%m')";
+        $query = SoInvoiceLine::query();
+        $dateFormat = $this->getDateFormatByPeriod('monthly', 'invoice_date', $query);
 
-        $data = SoInvoiceLine::selectRaw("$dateFormat as period")
+        $data = $query->selectRaw("$dateFormat as period")
             ->select('currency')
             ->selectRaw('SUM(amount) as revenue_original')
             ->selectRaw('SUM(amount_hc) as revenue_home_currency')
@@ -430,7 +464,7 @@ class Dashboard7Controller extends ApiController
     private function applyPeriodFilter($query, $period, $dateField)
     {
         $now = now();
-        
+
         switch ($period) {
             case 'mtd':
                 $query->whereYear($dateField, $now->year)

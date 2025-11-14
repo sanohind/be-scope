@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Models\SoInvoiceLine;
 use App\Models\SoInvoiceLine2;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -10,30 +11,112 @@ use Illuminate\Support\Facades\DB;
 class Dashboard4Controller extends ApiController
 {
     /**
+     * Get the appropriate model based on year
+     * - Year >= 2025: use SoInvoiceLine (so_invoice_line)
+     * - Year < 2025: use SoInvoiceLine2 (so_invoice_line_2)
+     */
+    private function getModelByYear($year)
+    {
+        return $year >= 2025 ? SoInvoiceLine::class : SoInvoiceLine2::class;
+    }
+
+    /**
+     * Get query builder for date range
+     * Rules:
+     * - If date_from and date_to both >= 2025: use SoInvoiceLine
+     * - If date_from and date_to both < 2025: use SoInvoiceLine2
+     * - If no dates specified or range crosses 2025: default to SoInvoiceLine2
+     */
+    private function getQueryForDateRange(Request $request)
+    {
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        
+        // If both dates specified
+        if ($dateFrom && $dateTo) {
+            $yearFrom = (int) substr($dateFrom, 0, 4);
+            $yearTo = (int) substr($dateTo, 0, 4);
+            
+            // If both years >= 2025, use SoInvoiceLine
+            if ($yearFrom >= 2025 && $yearTo >= 2025) {
+                return SoInvoiceLine::query();
+            }
+            
+            // If both years < 2025, use SoInvoiceLine2
+            if ($yearFrom < 2025 && $yearTo < 2025) {
+                return SoInvoiceLine2::query();
+            }
+        }
+        
+        // If only date_from specified
+        if ($dateFrom && !$dateTo) {
+            $yearFrom = (int) substr($dateFrom, 0, 4);
+            if ($yearFrom >= 2025) {
+                return SoInvoiceLine::query();
+            }
+        }
+        
+        // If only date_to specified
+        if (!$dateFrom && $dateTo) {
+            $yearTo = (int) substr($dateTo, 0, 4);
+            if ($yearTo < 2025) {
+                return SoInvoiceLine2::query();
+            }
+        }
+        
+        // Default to SoInvoiceLine2 for backward compatibility and mixed ranges
+        return SoInvoiceLine2::query();
+    }
+    /**
      * Chart 4.1: Sales Overview KPI - KPI Cards
+     * 
+     * Query Parameters:
+     * - year: Year to display (default: latest data year)
+     * - month: Month to display (default: latest data month)
      */
     public function salesOverviewKpi(Request $request): JsonResponse
     {
-        $period = $request->get('period', 'ytd');
-        
-        $query = SoInvoiceLine2::query();
-        
-        // Apply period filter
-        $this->applyPeriodFilter($query, $period);
+        // Get latest month with data if not specified
+        if (!$request->has('year') || !$request->has('month')) {
+            // Try SoInvoiceLine first (2025+ data)
+            $latestData = SoInvoiceLine::selectRaw('YEAR(invoice_date) as year, MONTH(invoice_date) as month')
+                ->whereNotNull('invoice_date')
+                ->whereRaw('invoice_date < GETDATE()') // Only past dates
+                ->groupByRaw('YEAR(invoice_date), MONTH(invoice_date)')
+                ->havingRaw('SUM(amount_hc) > 0') // Only months with positive total
+                ->orderByRaw('YEAR(invoice_date) DESC, MONTH(invoice_date) DESC')
+                ->first();
+            
+            $year = $latestData ? $latestData->year : now()->year;
+            $month = $latestData ? $latestData->month : now()->month;
+        } else {
+            $year = $request->get('year');
+            $month = $request->get('month');
+        }
 
-        $totalSalesAmount = $query->sum('amount_hc');
-        $totalShipments = $query->distinct('shipment')->count('shipment');
-        $totalInvoices = $query->distinct('invoice_no')->count('invoice_no');
-        $outstandingInvoices = $query->where('invoice_status', 'Outstanding')
+        // Use appropriate model based on year
+        $model = $this->getModelByYear($year);
+        $currentMonthQuery = $model::query()
+            ->whereYear('invoice_date', $year)
+            ->whereMonth('invoice_date', $month);
+
+        $totalSalesAmount = (clone $currentMonthQuery)->sum('amount_hc');
+        $totalShipments = (clone $currentMonthQuery)->distinct('shipment')->count('shipment');
+        $totalInvoices = (clone $currentMonthQuery)->distinct('invoice_no')->count('invoice_no');
+        $outstandingInvoices = (clone $currentMonthQuery)
+            ->where('invoice_status', 'Outstanding')
             ->distinct('invoice_no')
             ->count('invoice_no');
 
-        // Calculate sales growth (requires previous period comparison)
-        $previousQuery = SoInvoiceLine2::query();
-        $this->applyPeriodFilter($previousQuery, $period, true);
-        $previousSalesAmount = $previousQuery->sum('amount_hc');
-        
-        $salesGrowth = $previousSalesAmount > 0 
+        // Previous month for comparison - may use different table
+        $prevDate = \Carbon\Carbon::create($year, $month, 1)->subMonth();
+        $prevModel = $this->getModelByYear($prevDate->year);
+        $previousSalesAmount = $prevModel::query()
+            ->whereYear('invoice_date', $prevDate->year)
+            ->whereMonth('invoice_date', $prevDate->month)
+            ->sum('amount_hc');
+
+        $salesGrowth = $previousSalesAmount > 0
             ? round((($totalSalesAmount - $previousSalesAmount) / $previousSalesAmount) * 100, 2)
             : 0;
 
@@ -43,18 +126,32 @@ class Dashboard4Controller extends ApiController
             'total_invoices' => $totalInvoices,
             'outstanding_invoices' => $outstandingInvoices,
             'sales_growth' => $salesGrowth,
-            'period' => $period
+            'period' => sprintf('%04d-%02d', $year, $month),
+            'month' => \Carbon\Carbon::create($year, $month, 1)->format('F Y')
         ]);
     }
 
     /**
      * Chart 4.2: Revenue Trend - Area Chart with Line
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - group_by: Alias for period parameter
+     * - customer: Filter by customer
+     * - product_type: Filter by product type
+     * - date_from: Start date filter (invoice_date)
+     * - date_to: End date filter (invoice_date)
      */
     public function revenueTrend(Request $request): JsonResponse
     {
-        $groupBy = $request->get('group_by', 'monthly');
-        
-        $query = SoInvoiceLine2::query();
+        $period = $request->get('period', $request->get('group_by', 'monthly'));
+
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'monthly';
+        }
+
+        $query = $this->getQueryForDateRange($request);
 
         // Apply filters
         if ($request->has('customer')) {
@@ -63,21 +160,12 @@ class Dashboard4Controller extends ApiController
         if ($request->has('product_type')) {
             $query->where('product_type', $request->product_type);
         }
-        if ($request->has('date_from')) {
-            $query->where('invoice_date', '>=', $request->date_from);
-        }
-        if ($request->has('date_to')) {
-            $query->where('invoice_date', '<=', $request->date_to);
-        }
 
-        // Group by period
-        if ($groupBy === 'daily') {
-            $dateFormat = "DATE(invoice_date)";
-        } elseif ($groupBy === 'weekly') {
-            $dateFormat = "DATE_FORMAT(invoice_date, '%Y-W%u')";
-        } else {
-            $dateFormat = "DATE_FORMAT(invoice_date, '%Y-%m')";
-        }
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'invoice_date');
+
+        // Get date format based on period
+        $dateFormat = $this->getDateFormatByPeriod($period, 'invoice_date', $query);
 
         $data = $query->selectRaw("$dateFormat as period")
             ->selectRaw('SUM(amount_hc) as revenue')
@@ -86,48 +174,79 @@ class Dashboard4Controller extends ApiController
             ->orderByRaw($dateFormat)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date')
+        ]);
     }
 
     /**
      * Chart 4.3: Top Customers by Revenue - Horizontal Bar Chart
+     *
+     * Query Parameters:
+     * - limit: Number of records to return (default: 20)
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (invoice_date)
+     * - date_to: End date filter (invoice_date)
      */
     public function topCustomersByRevenue(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 20);
+        $query = $this->getQueryForDateRange($request);
 
-        $data = SoInvoiceLine2::select('bp_name')
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'invoice_date');
+
+        // Get total revenue before executing the main query
+        $totalRevenue = (clone $query)->sum('amount_hc');
+
+        $data = $query->select('bp_name')
             ->selectRaw('SUM(amount_hc) as total_revenue')
             ->selectRaw('COUNT(DISTINCT sales_order) as number_of_orders')
             ->selectRaw('ROUND(AVG(amount_hc), 2) as avg_order_value')
             ->selectRaw('SUM(delivered_qty) as total_qty')
             ->selectRaw('ROUND(AVG(price_hc), 2) as avg_price')
             ->groupBy('bp_name')
-            ->orderBy('total_revenue', 'desc')
+            ->orderByRaw('SUM(amount_hc) desc')
             ->limit($limit)
             ->get();
 
         // Calculate revenue contribution percentage
-        $totalRevenue = SoInvoiceLine2::sum('amount_hc');
         $data = $data->map(function ($item) use ($totalRevenue) {
-            $item->revenue_contribution = $totalRevenue > 0 
-                ? round(($item->total_revenue / $totalRevenue) * 100, 2) 
+            $item->revenue_contribution = $totalRevenue > 0
+                ? round(($item->total_revenue / $totalRevenue) * 100, 2)
                 : 0;
             return $item;
         });
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date')
+        ]);
     }
 
     /**
      * Chart 4.4: Sales by Product Type - Donut Chart
+     * Shows revenue for the current month only
      */
     public function salesByProductType(): JsonResponse
     {
-        $data = SoInvoiceLine2::select('product_type')
+        // Get current year and month
+        $now = now();
+        $currentYear = $now->year;
+        $currentMonth = $now->month;
+        
+        // Use appropriate model based on current year
+        $model = $this->getModelByYear($currentYear);
+
+        $actualMonth = $currentMonth - 1;
+        
+        $data = $model::select('product_type')
             ->selectRaw('SUM(amount_hc) as revenue')
             ->selectRaw('SUM(delivered_qty) as qty_sold')
             ->selectRaw('COUNT(DISTINCT invoice_no) as invoice_count')
+            ->whereYear('invoice_date', $currentYear)
+            ->whereMonth('invoice_date', $actualMonth)
             ->groupBy('product_type')
             ->orderBy('revenue', 'desc')
             ->get();
@@ -136,61 +255,68 @@ class Dashboard4Controller extends ApiController
 
         // Calculate percentage for each product type
         $data = $data->map(function ($item) use ($totalRevenue) {
-            $item->percentage = $totalRevenue > 0 
-                ? round(($item->revenue / $totalRevenue) * 100, 2) 
+            $item->percentage = $totalRevenue > 0
+                ? round(($item->revenue / $totalRevenue) * 100, 2)
                 : 0;
             return $item;
         });
 
         return response()->json([
             'data' => $data,
-            'total_revenue' => $totalRevenue
+            'total_revenue' => $totalRevenue,
+            'period' => sprintf('%04d-%02d', $currentYear, $actualMonth)
         ]);
     }
 
     /**
-     * Chart 4.5: Shipment Status Tracking - Funnel Chart
-     * Note: Receipt data not available in ERP2 database
+     * Chart 4.5: Shipment Status Tracking - Bar Chart
+     * Shows distinct counts for each stage of the sales process
+     * Note: Receipt data only available in ERP database (SoInvoiceLine)
      */
     public function shipmentStatusTracking(): JsonResponse
     {
-        $salesOrdersCreated = SoInvoiceLine2::distinct('sales_order')->count('sales_order');
-        $shipmentsGenerated = SoInvoiceLine2::distinct('shipment')->count('shipment');
-        $invoicesIssued = SoInvoiceLine2::distinct('invoice_no')->count('invoice_no');
-        $invoicesPaid = SoInvoiceLine2::where('invoice_status', 'Paid')
+        // Use SoInvoiceLine (ERP) for complete data including receipt information
+        $salesOrdersCreated = SoInvoiceLine::distinct('sales_order')->count('sales_order');
+        $shipmentsGenerated = SoInvoiceLine::distinct('shipment')->count('shipment');
+        $receiptsConfirmed = SoInvoiceLine::distinct('receipt')->count('receipt');
+        $invoicesIssued = SoInvoiceLine::distinct('invoice_no')->count('invoice_no');
+        $invoicesPosted = SoInvoiceLine::where('invoice_status', 'Posted')
             ->distinct('invoice_no')
             ->count('invoice_no');
 
-        // Calculate conversion rates
-        $conversionRates = [
-            'sales_to_shipment' => $salesOrdersCreated > 0 
-                ? round(($shipmentsGenerated / $salesOrdersCreated) * 100, 2) 
-                : 0,
-            'shipment_to_invoice' => $shipmentsGenerated > 0 
-                ? round(($invoicesIssued / $shipmentsGenerated) * 100, 2) 
-                : 0,
-            'invoice_to_paid' => $invoicesIssued > 0 
-                ? round(($invoicesPaid / $invoicesIssued) * 100, 2) 
-                : 0
-        ];
-
         return response()->json([
-            'stages' => [
-                'sales_orders_created' => $salesOrdersCreated,
-                'shipments_generated' => $shipmentsGenerated,
-                'invoices_issued' => $invoicesIssued,
-                'invoices_paid' => $invoicesPaid
-            ],
-            'conversion_rates' => $conversionRates
+            'data' => [
+                [
+                    'stage' => 'Sales Orders Created',
+                    'count' => $salesOrdersCreated
+                ],
+                [
+                    'stage' => 'Shipments Generated',
+                    'count' => $shipmentsGenerated
+                ],
+                [
+                    'stage' => 'Receipts Confirmed',
+                    'count' => $receiptsConfirmed
+                ],
+                [
+                    'stage' => 'Invoices Issued',
+                    'count' => $invoicesIssued
+                ],
+                [
+                    'stage' => 'Invoices Posted',
+                    'count' => $invoicesPosted
+                ]
+            ]
         ]);
     }
 
     /**
-     * Chart 4.6: Delivery Performance - Gauge Chart
+     * Chart 4.7: Delivery Performance - Gauge Chart
      * Note: Using invoice_date vs delivery_date comparison (receipt_date not available in ERP2)
      */
     public function deliveryPerformance(): JsonResponse
     {
+        // Default to SoInvoiceLine2 for historical aggregate data
         $totalDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
             ->whereNotNull('delivery_date')
             ->count();
@@ -210,14 +336,14 @@ class Dashboard4Controller extends ApiController
             ->whereRaw('invoice_date > delivery_date')
             ->count();
 
-        $earlyPercentage = $totalDeliveries > 0 
-            ? round(($earlyDeliveries / $totalDeliveries) * 100, 2) 
+        $earlyPercentage = $totalDeliveries > 0
+            ? round(($earlyDeliveries / $totalDeliveries) * 100, 2)
             : 0;
-        $onTimePercentage = $totalDeliveries > 0 
-            ? round(($onTimeDeliveries / $totalDeliveries) * 100, 2) 
+        $onTimePercentage = $totalDeliveries > 0
+            ? round(($onTimeDeliveries / $totalDeliveries) * 100, 2)
             : 0;
-        $latePercentage = $totalDeliveries > 0 
-            ? round(($lateDeliveries / $totalDeliveries) * 100, 2) 
+        $latePercentage = $totalDeliveries > 0
+            ? round(($lateDeliveries / $totalDeliveries) * 100, 2)
             : 0;
 
         $onTimeDeliveryRate = $earlyPercentage + $onTimePercentage;
@@ -233,13 +359,33 @@ class Dashboard4Controller extends ApiController
     }
 
     /**
-     * Chart 4.7: Invoice Status Distribution - Stacked Bar Chart
+     * Chart 4.6: Invoice Status Distribution - Stacked Bar Chart (100%)
+     * Data Source: so_invoice_line
+     * 
+     * Dimensions:
+     * - X-axis: Time Period (monthly) or Customer
+     * - Y-axis: Percentage
+     * - Stack: Invoice Status (invoice_status)
+     * 
+     * Status Categories:
+     * - Paid (Green)
+     * - Outstanding (Yellow)
+     * - Overdue (Red)
+     * - Cancelled (Gray)
+     * 
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - group_by: Can be 'customer' or period (daily/monthly/yearly)
+     * - date_from: Start date filter (invoice_date)
+     * - date_to: End date filter (invoice_date)
      */
     public function invoiceStatusDistribution(Request $request): JsonResponse
     {
         $groupBy = $request->get('group_by', 'monthly');
-        
-        $query = SoInvoiceLine2::query();
+        $query = $this->getQueryForDateRange($request);
+
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'invoice_date');
 
         // Group by period or customer
         if ($groupBy === 'customer') {
@@ -249,7 +395,10 @@ class Dashboard4Controller extends ApiController
                 ->orderBy('bp_name')
                 ->get();
         } else {
-            $dateFormat = "DATE_FORMAT(invoice_date, '%Y-%m')";
+            // Validate period
+            $period = in_array($groupBy, ['daily', 'monthly', 'yearly']) ? $groupBy : 'monthly';
+            $dateFormat = $this->getDateFormatByPeriod($period, 'invoice_date', $query);
+
             $data = $query->selectRaw("$dateFormat as category")
                 ->select('invoice_status')
                 ->selectRaw('COUNT(DISTINCT invoice_no) as count')
@@ -259,47 +408,123 @@ class Dashboard4Controller extends ApiController
                 ->get();
         }
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date')
+        ]);
     }
 
     /**
-     * Chart 4.8: Sales Order Fulfillment - Combo Chart
+     * Chart 4.7: Sales Order Fulfillment - Bar Chart
+     * Shows delivered quantity with monthly and yearly filter options
+     * Data split: Aug 2025+ from ERP (SoInvoiceLine), before Aug 2025 from ERP2 (SoInvoiceLine2)
+     *
+     * Query Parameters:
+     * - period: Filter by period (monthly, yearly) - default: monthly
+     * - date_from: Start date filter (invoice_date)
+     * - date_to: End date filter (invoice_date)
+     * - product_type: Filter by product type
+     * - customer: Filter by customer
      */
     public function salesOrderFulfillment(Request $request): JsonResponse
     {
-        $groupBy = $request->get('group_by', 'period');
+        $period = $request->get('period', 'monthly');
         
-        $query = SoInvoiceLine2::query();
-
-        if ($groupBy === 'product_type') {
-            $data = $query->select('product_type as category')
-                ->selectRaw('SUM(delivered_qty) as delivered_qty')
-                ->selectRaw('SUM(invoice_qty) as invoiced_qty')
-                ->selectRaw('ROUND((SUM(invoice_qty) / NULLIF(SUM(delivered_qty), 0)) * 100, 2) as fulfillment_rate')
-                ->groupBy('product_type')
-                ->get();
-        } else {
-            $dateFormat = "DATE_FORMAT(invoice_date, '%Y-%m')";
-            $data = $query->selectRaw("$dateFormat as category")
-                ->selectRaw('SUM(delivered_qty) as delivered_qty')
-                ->selectRaw('SUM(invoice_qty) as invoiced_qty')
-                ->selectRaw('ROUND((SUM(invoice_qty) / NULLIF(SUM(delivered_qty), 0)) * 100, 2) as fulfillment_rate')
-                ->groupByRaw($dateFormat)
-                ->orderByRaw($dateFormat)
-                ->get();
+        // Validate period - only monthly and yearly allowed
+        if (!in_array($period, ['monthly', 'yearly'])) {
+            $period = 'monthly';
         }
 
-        return response()->json($data);
+        // Determine date range - default to current year if not specified
+        $dateTo = $request->get('date_to', date('Y-12-31'));
+        $dateFrom = $request->get('date_from', date('Y-01-01'));
+
+        $allData = collect();
+
+        // Helper function to apply filters
+        $applyFilters = function($query, $request) {
+            if ($request->has('product_type')) {
+                $query->where('product_type', $request->product_type);
+            }
+            if ($request->has('customer')) {
+                $query->where('bp_name', $request->customer);
+            }
+        };
+
+        // Parse dates to determine which data source to use
+        $fromDate = \Carbon\Carbon::parse($dateFrom);
+        $toDate = \Carbon\Carbon::parse($dateTo);
+        $splitDate = \Carbon\Carbon::parse('2025-08-01');
+
+        // Query data from ERP2 (before Aug 2025)
+        if ($fromDate->lt($splitDate)) {
+            $query2 = SoInvoiceLine2::query();
+            $applyFilters($query2, $request);
+            
+            $erp2EndDate = $toDate->lt($splitDate) ? $toDate : $splitDate->copy()->subDay();
+            
+            $isSqlServer2 = $query2->getConnection()->getDriverName() === 'sqlsrv';
+            $dateFormat2 = $period === 'yearly' 
+                ? ($isSqlServer2 ? "CAST(YEAR(invoice_date) AS VARCHAR)" : "YEAR(invoice_date)")
+                : ($isSqlServer2 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)" : "DATE_FORMAT(invoice_date, '%Y-%m')");
+            
+            $erp2Data = $query2
+                ->selectRaw("$dateFormat2 as period")
+                ->selectRaw('SUM(delivered_qty) as delivered_qty')
+                ->where('invoice_date', '>=', $fromDate->format('Y-m-d'))
+                ->where('invoice_date', '<=', $erp2EndDate->format('Y-m-d'))
+                ->groupByRaw($dateFormat2)
+                ->orderByRaw($dateFormat2)
+                ->get();
+            
+            $allData = $allData->merge($erp2Data);
+        }
+
+        // Query data from ERP (Aug 2025 onwards)
+        if ($toDate->gte($splitDate)) {
+            $query1 = SoInvoiceLine::query();
+            $applyFilters($query1, $request);
+            
+            $erp1StartDate = $fromDate->gte($splitDate) ? $fromDate : $splitDate;
+            
+            $isSqlServer1 = $query1->getConnection()->getDriverName() === 'sqlsrv';
+            $dateFormat1 = $period === 'yearly' 
+                ? ($isSqlServer1 ? "CAST(YEAR(invoice_date) AS VARCHAR)" : "YEAR(invoice_date)")
+                : ($isSqlServer1 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)" : "DATE_FORMAT(invoice_date, '%Y-%m')");
+            
+            $erp1Data = $query1
+                ->selectRaw("$dateFormat1 as period")
+                ->selectRaw('SUM(delivered_qty) as delivered_qty')
+                ->where('invoice_date', '>=', $erp1StartDate->format('Y-m-d'))
+                ->where('invoice_date', '<=', $toDate->format('Y-m-d'))
+                ->groupByRaw($dateFormat1)
+                ->orderByRaw($dateFormat1)
+                ->get();
+            
+            $allData = $allData->merge($erp1Data);
+        }
+
+        // Sort and merge data by period
+        $sortedData = $allData->sortBy('period')->values();
+
+        return response()->json([
+            'data' => $sortedData,
+            'filter_metadata' => [
+                'period' => $period,
+                'date_from' => $dateFrom,
+                'date_to' => $dateTo
+            ]
+        ]);
     }
 
     /**
-     * Chart 4.9: Top Selling Products - Data Table with Sparkline
+     * Chart 4.8: Top Selling Products - Data Table with Sparkline
      */
     public function topSellingProducts(Request $request): JsonResponse
     {
-        $limit = $request->get('limit', 50);
-        
-        $query = SoInvoiceLine2::query();
+        $limit = $request->get('limit', 10);
+
+        $query = $this->getQueryForDateRange($request);
 
         // Apply filters
         if ($request->has('product_type')) {
@@ -335,14 +560,27 @@ class Dashboard4Controller extends ApiController
     }
 
     /**
-     * Chart 4.10: Revenue by Currency - Pie Chart
+     * Chart 4.9: Revenue by Currency - Pie Chart
+     * Shows revenue for the current month only
      */
     public function revenueByCurrency(): JsonResponse
     {
-        $data = SoInvoiceLine2::select('currency')
+        // Get current year and month
+        $now = now();
+        $currentYear = $now->year;
+        $currentMonth = $now->month;
+        
+        // Use appropriate model based on current year
+        $model = $this->getModelByYear($currentYear);
+
+        $actualMonth = $currentMonth - 1;
+        
+        $data = $model::select('currency')
             ->selectRaw('SUM(amount) as amount_original')
             ->selectRaw('SUM(amount_hc) as amount_hc')
             ->selectRaw('COUNT(DISTINCT invoice_no) as invoice_count')
+            ->whereYear('invoice_date', $currentYear)
+            ->whereMonth('invoice_date', $actualMonth)
             ->groupBy('currency')
             ->orderBy('amount_hc', 'desc')
             ->get();
@@ -351,68 +589,131 @@ class Dashboard4Controller extends ApiController
 
         // Calculate percentage
         $data = $data->map(function ($item) use ($totalAmountHc) {
-            $item->percentage = $totalAmountHc > 0 
-                ? round(($item->amount_hc / $totalAmountHc) * 100, 2) 
+            $item->percentage = $totalAmountHc > 0
+                ? round(($item->amount_hc / $totalAmountHc) * 100, 2)
                 : 0;
             return $item;
         });
 
         return response()->json([
             'data' => $data,
-            'total_amount_hc' => $totalAmountHc
+            'total_amount_hc' => $totalAmountHc,
+            'period' => sprintf('%04d-%02d', $currentYear, $actualMonth)
         ]);
     }
 
     /**
-     * Chart 4.11: Monthly Sales Comparison - Clustered Column Chart
+     * Chart 4.10: Monthly Sales Comparison - Bar Chart
+     * Shows month-over-month (MoM) revenue comparison
+     * Data split: Aug 2025+ from ERP (SoInvoiceLine), before Aug 2025 from ERP2 (SoInvoiceLine2)
+     *
+     * Query Parameters:
+     * - date_from: Start date filter (invoice_date) - default: 12 months ago
+     * - date_to: End date filter (invoice_date) - default: current month
+     * - product_type: Filter by product type
+     * - customer: Filter by customer
      */
     public function monthlySalesComparison(Request $request): JsonResponse
     {
-        $currentYear = $request->get('current_year', date('Y'));
-        $previousYear = $currentYear - 1;
+        // Determine date range
+        $dateTo = $request->get('date_to', date('Y-m-t')); // End of current month
+        $dateFrom = $request->get('date_from', date('Y-m-01', strtotime('-11 months'))); // 12 months of data
 
-        // Apply filters
-        $query = SoInvoiceLine2::query();
-        
-        if ($request->has('product_type')) {
-            $query->where('product_type', $request->product_type);
+        $allData = collect();
+
+        // Helper function to apply filters
+        $applyFilters = function($query, $request) {
+            if ($request->has('product_type')) {
+                $query->where('product_type', $request->product_type);
+            }
+            if ($request->has('customer')) {
+                $query->where('bp_name', $request->customer);
+            }
+        };
+
+        // Parse dates to determine which data source to use
+        $fromDate = \Carbon\Carbon::parse($dateFrom);
+        $toDate = \Carbon\Carbon::parse($dateTo);
+        $splitDate = \Carbon\Carbon::parse('2025-08-01');
+
+        // Query data from ERP2 (before Aug 2025)
+        if ($fromDate->lt($splitDate)) {
+            $query2 = SoInvoiceLine2::query();
+            $applyFilters($query2, $request);
+            
+            $erp2EndDate = $toDate->lt($splitDate) ? $toDate : $splitDate->copy()->subDay();
+            
+            $isSqlServer2 = $query2->getConnection()->getDriverName() === 'sqlsrv';
+            $dateFormat2 = $isSqlServer2 
+                ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)"
+                : "DATE_FORMAT(invoice_date, '%Y-%m')";
+            
+            $erp2Data = $query2
+                ->selectRaw("$dateFormat2 as period")
+                ->selectRaw('SUM(amount_hc) as revenue')
+                ->where('invoice_date', '>=', $fromDate->format('Y-m-d'))
+                ->where('invoice_date', '<=', $erp2EndDate->format('Y-m-d'))
+                ->groupByRaw($dateFormat2)
+                ->orderByRaw($dateFormat2)
+                ->get();
+            
+            $allData = $allData->merge($erp2Data);
         }
-        if ($request->has('customer')) {
-            $query->where('bp_name', $request->customer);
+
+        // Query data from ERP (Aug 2025 onwards)
+        if ($toDate->gte($splitDate)) {
+            $query1 = SoInvoiceLine::query();
+            $applyFilters($query1, $request);
+            
+            $erp1StartDate = $fromDate->gte($splitDate) ? $fromDate : $splitDate;
+            
+            $isSqlServer1 = $query1->getConnection()->getDriverName() === 'sqlsrv';
+            $dateFormat1 = $isSqlServer1 
+                ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)"
+                : "DATE_FORMAT(invoice_date, '%Y-%m')";
+            
+            $erp1Data = $query1
+                ->selectRaw("$dateFormat1 as period")
+                ->selectRaw('SUM(amount_hc) as revenue')
+                ->where('invoice_date', '>=', $erp1StartDate->format('Y-m-d'))
+                ->where('invoice_date', '<=', $toDate->format('Y-m-d'))
+                ->groupByRaw($dateFormat1)
+                ->orderByRaw($dateFormat1)
+                ->get();
+            
+            $allData = $allData->merge($erp1Data);
         }
 
-        $data = $query->selectRaw("DATE_FORMAT(invoice_date, '%m') as month")
-            ->selectRaw("YEAR(invoice_date) as year")
-            ->selectRaw('SUM(amount_hc) as revenue')
-            ->whereIn(DB::raw('YEAR(invoice_date)'), [$currentYear, $previousYear])
-            ->groupByRaw("YEAR(invoice_date), DATE_FORMAT(invoice_date, '%m')")
-            ->orderByRaw("DATE_FORMAT(invoice_date, '%m')")
-            ->get();
+        // Sort data by period
+        $sortedData = $allData->sortBy('period')->values();
 
-        // Calculate YoY growth
-        $grouped = $data->groupBy('month');
+        // Calculate MoM (Month-over-Month) growth
         $result = [];
+        $previousRevenue = null;
 
-        foreach ($grouped as $month => $items) {
-            $currentYearData = $items->where('year', $currentYear)->first();
-            $previousYearData = $items->where('year', $previousYear)->first();
-
-            $currentRevenue = $currentYearData ? $currentYearData->revenue : 0;
-            $previousRevenue = $previousYearData ? $previousYearData->revenue : 0;
-
-            $yoyGrowth = $previousRevenue > 0 
-                ? round((($currentRevenue - $previousRevenue) / $previousRevenue) * 100, 2) 
-                : 0;
+        foreach ($sortedData as $index => $item) {
+            $currentRevenue = $item->revenue;
+            
+            $momGrowth = null;
+            if ($previousRevenue !== null && $previousRevenue > 0) {
+                $momGrowth = round((($currentRevenue - $previousRevenue) / $previousRevenue) * 100, 2);
+            }
 
             $result[] = [
-                'month' => $month,
-                'current_year_revenue' => $currentRevenue,
-                'previous_year_revenue' => $previousRevenue,
-                'yoy_growth' => $yoyGrowth
+                'period' => $item->period,
+                'revenue' => $currentRevenue,
+                'previous_month_revenue' => $previousRevenue,
+                'mom_growth' => $momGrowth
             ];
+
+            $previousRevenue = $currentRevenue;
         }
 
-        return response()->json($result);
+        return response()->json([
+            'data' => $result,
+            'date_from' => $dateFrom,
+            'date_to' => $dateTo
+        ]);
     }
 
     /**
@@ -441,7 +742,7 @@ class Dashboard4Controller extends ApiController
     private function applyPeriodFilter($query, $period, $previous = false)
     {
         $now = now();
-        
+
         switch ($period) {
             case 'mtd': // Month to Date
                 if ($previous) {

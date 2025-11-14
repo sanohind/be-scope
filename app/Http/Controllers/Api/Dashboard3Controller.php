@@ -11,13 +11,23 @@ class Dashboard3Controller extends ApiController
 {
     /**
      * Chart 3.1: Production KPI Summary - KPI Cards
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (planning_date)
+     * - date_to: End date filter (planning_date)
      */
-    public function productionKpiSummary(): JsonResponse
+    public function productionKpiSummary(Request $request): JsonResponse
     {
-        $totalProductionOrders = ProdHeader::distinct('prod_no')->count('prod_no');
-        $totalQtyOrdered = ProdHeader::sum('qty_order');
-        $totalQtyDelivered = ProdHeader::sum('qty_delivery');
-        $totalOutstandingQty = ProdHeader::sum('qty_os');
+        $query = ProdHeader::query();
+
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'planning_date');
+
+        $totalProductionOrders = (clone $query)->distinct('prod_no')->count('prod_no');
+        $totalQtyOrdered = (clone $query)->sum('qty_order');
+        $totalQtyDelivered = (clone $query)->sum('qty_delivery');
+        $totalOutstandingQty = (clone $query)->sum('qty_os');
 
         $completionRate = $totalQtyOrdered > 0
             ? round(($totalQtyDelivered / $totalQtyOrdered) * 100, 2)
@@ -28,16 +38,27 @@ class Dashboard3Controller extends ApiController
             'total_qty_ordered' => $totalQtyOrdered,
             'total_qty_delivered' => $totalQtyDelivered,
             'total_outstanding_qty' => $totalOutstandingQty,
-            'completion_rate' => $completionRate
+            'completion_rate' => $completionRate,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
         ]);
     }
 
     /**
      * Chart 3.2: Production Status Distribution - Pie/Donut Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (planning_date)
+     * - date_to: End date filter (planning_date)
      */
-    public function productionStatusDistribution(): JsonResponse
+    public function productionStatusDistribution(Request $request): JsonResponse
     {
-        $data = ProdHeader::select('status')
+        $query = ProdHeader::query();
+
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'planning_date');
+
+        $data = $query->select('status')
             ->selectRaw('COUNT(prod_no) as count')
             ->selectRaw('SUM(qty_order) as total_qty')
             ->groupBy('status')
@@ -47,18 +68,29 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'total_orders' => $totalOrders
+            'total_orders' => $totalOrders,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
         ]);
     }
 
     /**
      * Chart 3.3: Production by Customer - Clustered Bar Chart
+     *
+     * Query Parameters:
+     * - limit: Number of records to return (default: 15)
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (planning_date)
+     * - date_to: End date filter (planning_date)
      */
     public function productionByCustomer(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 15);
+        $query = ProdHeader::query();
 
-        $data = ProdHeader::select('customer')
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'planning_date');
+
+        $data = $query->select('customer')
             ->selectRaw('SUM(qty_order) as qty_ordered')
             ->selectRaw('SUM(qty_delivery) as qty_delivered')
             ->selectRaw('SUM(qty_os) as qty_outstanding')
@@ -67,17 +99,30 @@ class Dashboard3Controller extends ApiController
             ->limit($limit)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+        ]);
     }
 
     /**
      * Chart 3.4: Production by Model - Horizontal Bar Chart
+     *
+     * Query Parameters:
+     * - limit: Number of records to return (default: 20)
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (planning_date)
+     * - date_to: End date filter (planning_date)
      */
     public function productionByModel(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 20);
+        $query = ProdHeader::query();
 
-        $data = ProdHeader::select('model', 'customer')
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'planning_date');
+
+        $data = $query->select('model', 'customer')
             ->selectRaw('SUM(qty_order) as total_qty')
             ->selectRaw('COUNT(DISTINCT prod_no) as total_orders')
             ->groupBy('model', 'customer')
@@ -85,7 +130,10 @@ class Dashboard3Controller extends ApiController
             ->limit($limit)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+        ]);
     }
 
     /**
@@ -143,13 +191,16 @@ class Dashboard3Controller extends ApiController
             ])
             ->selectRaw('CASE
                 WHEN qty_os = 0 THEN "completed"
-                WHEN planning_date < CURDATE() AND qty_os > 0 THEN "delayed"
+                WHEN planning_date < CAST(GETDATE() AS DATE) AND qty_os > 0 THEN "delayed"
                 ELSE "active"
             END as timeline_status')
             ->orderBy('planning_date', 'asc')
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+        ]);
     }
 
     /**
@@ -202,15 +253,28 @@ class Dashboard3Controller extends ApiController
                 : $data->sortByDesc('qty_os');
         }
 
-        return response()->json($data->values());
+        return response()->json([
+            'data' => $data->values(),
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+        ]);
     }
 
     /**
      * Chart 3.7: Production by Division - Stacked Bar Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (planning_date)
+     * - date_to: End date filter (planning_date)
      */
-    public function productionByDivision(): JsonResponse
+    public function productionByDivision(Request $request): JsonResponse
     {
-        $data = ProdHeader::select('divisi', 'status')
+        $query = ProdHeader::query();
+
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'planning_date');
+
+        $data = $query->select('divisi', 'status')
             ->selectRaw('SUM(qty_order) as production_volume')
             ->selectRaw('COUNT(DISTINCT prod_no) as total_orders')
             ->selectRaw('ROUND(AVG((qty_delivery / NULLIF(qty_order, 0)) * 100), 2) as avg_completion_rate')
@@ -218,15 +282,31 @@ class Dashboard3Controller extends ApiController
             ->orderBy('divisi')
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+        ]);
     }
 
     /**
      * Chart 3.8: Production Trend - Combo Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - group_by: Alias for period parameter
+     * - customer: Filter by customer
+     * - divisi: Filter by division
+     * - date_from: Start date filter (planning_date)
+     * - date_to: End date filter (planning_date)
      */
     public function productionTrend(Request $request): JsonResponse
     {
-        $groupBy = $request->get('group_by', 'monthly');
+        $period = $request->get('period', $request->get('group_by', 'monthly'));
+
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'monthly';
+        }
 
         $query = ProdHeader::query();
 
@@ -237,19 +317,12 @@ class Dashboard3Controller extends ApiController
         if ($request->has('divisi')) {
             $query->where('divisi', $request->divisi);
         }
-        if ($request->has('date_from')) {
-            $query->where('planning_date', '>=', $request->date_from);
-        }
-        if ($request->has('date_to')) {
-            $query->where('planning_date', '<=', $request->date_to);
-        }
 
-        // Group by period
-        if ($groupBy === 'weekly') {
-            $dateFormat = "DATE_FORMAT(planning_date, '%Y-W%u')";
-        } else {
-            $dateFormat = "DATE_FORMAT(planning_date, '%Y-%m')";
-        }
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'planning_date');
+
+        // Get date format based on period
+        $dateFormat = $this->getDateFormatByPeriod($period, 'planning_date', $query);
 
         $data = $query->selectRaw("$dateFormat as period")
             ->selectRaw('SUM(qty_order) as qty_ordered')
@@ -259,37 +332,51 @@ class Dashboard3Controller extends ApiController
             ->orderByRaw($dateFormat)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+        ]);
     }
 
     /**
      * Chart 3.9: Outstanding Trend - Line Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (planning_date)
+     * - date_to: End date filter (planning_date)
      */
     public function outstandingTrend(Request $request): JsonResponse
     {
+        $period = $request->get('period', 'monthly');
+
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'monthly';
+        }
+
         $query = ProdHeader::query()->where('qty_os', '>', 0);
 
-        // Apply filters
-        if ($request->has('date_from')) {
-            $query->where('planning_date', '>=', $request->date_from);
-        }
-        if ($request->has('date_to')) {
-            $query->where('planning_date', '<=', $request->date_to);
-        }
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'planning_date');
 
-        $data = $query->selectRaw('YEAR(planning_date) as tahun')
-            ->selectRaw('MONTH(planning_date) as bulan')
-            ->selectRaw("DATE_FORMAT(planning_date, '%Y-%m') as periode")
+        // Get date format based on period
+        $dateFormat = $this->getDateFormatByPeriod($period, 'planning_date', $query);
+
+        $data = $query->selectRaw("$dateFormat as periode")
             ->selectRaw('COUNT(DISTINCT prod_no) as total_prod')
             ->selectRaw('SUM(qty_order) as total_order')
             ->selectRaw('SUM(qty_delivery) as total_delivery')
             ->selectRaw('SUM(qty_os) as total_outstanding')
             ->selectRaw('CAST(SUM(qty_os) * 100.0 / NULLIF(SUM(qty_order), 0) AS DECIMAL(10,2)) as pct_outstanding')
-            ->groupByRaw('YEAR(planning_date), MONTH(planning_date), DATE_FORMAT(planning_date, "%Y-%m")')
-            ->orderByRaw('tahun, bulan')
+            ->groupByRaw($dateFormat)
+            ->orderByRaw($dateFormat)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+        ]);
     }
 
     /**
@@ -298,13 +385,13 @@ class Dashboard3Controller extends ApiController
     public function getAllData(Request $request): JsonResponse
     {
         return response()->json([
-            'production_kpi_summary' => $this->productionKpiSummary()->getData(true),
-            'production_status_distribution' => $this->productionStatusDistribution()->getData(true),
+            'production_kpi_summary' => $this->productionKpiSummary($request)->getData(true),
+            'production_status_distribution' => $this->productionStatusDistribution($request)->getData(true),
             'production_by_customer' => $this->productionByCustomer($request)->getData(true),
             'production_by_model' => $this->productionByModel($request)->getData(true),
             'production_schedule_timeline' => $this->productionScheduleTimeline($request)->getData(true),
             'production_outstanding_analysis' => $this->productionOutstandingAnalysis($request)->getData(true),
-            'production_by_division' => $this->productionByDivision()->getData(true),
+            'production_by_division' => $this->productionByDivision($request)->getData(true),
             'production_trend' => $this->productionTrend($request)->getData(true),
             'outstanding_trend' => $this->outstandingTrend($request)->getData(true)
         ]);

@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class ProdHeader extends Model
 {
+    protected $connection = 'erp';
     protected $table = 'view_prod_header';
     public $timestamps = false;
 

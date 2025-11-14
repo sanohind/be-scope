@@ -12,18 +12,28 @@ class Dashboard2Controller extends ApiController
 {
     /**
      * Chart 2.1: Warehouse Order Summary - KPI Cards
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (order_date)
+     * - date_to: End date filter (order_date)
      */
-    public function warehouseOrderSummary(): JsonResponse
+    public function warehouseOrderSummary(Request $request): JsonResponse
     {
-        $totalOrderLines = WarehouseOrderLine::count();
+        $query = WarehouseOrderLine::query();
+
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'order_date');
+
+        $totalOrderLines = (clone $query)->count();
 
         // Count by actual line_status values: Staged, NULL, Adviced, Released, Open, Shipped
-        $stagedOrders = WarehouseOrderLine::where('line_status', 'Staged')->count();
-        $nullStatusOrders = WarehouseOrderLine::whereNull('line_status')->count();
-        $advicedOrders = WarehouseOrderLine::where('line_status', 'Adviced')->count();
-        $releasedOrders = WarehouseOrderLine::where('line_status', 'Released')->count();
-        $openOrders = WarehouseOrderLine::where('line_status', 'Open')->count();
-        $shippedOrders = WarehouseOrderLine::where('line_status', 'Shipped')->count();
+        $stagedOrders = (clone $query)->where('line_status', 'Staged')->count();
+        $nullStatusOrders = (clone $query)->whereNull('line_status')->count();
+        $advicedOrders = (clone $query)->where('line_status', 'Adviced')->count();
+        $releasedOrders = (clone $query)->where('line_status', 'Released')->count();
+        $openOrders = (clone $query)->where('line_status', 'Open')->count();
+        $shippedOrders = (clone $query)->where('line_status', 'Shipped')->count();
 
         // Pending deliveries: Staged, NULL, Adviced, Released, Open
         $pendingDeliveries = $stagedOrders + $nullStatusOrders + $advicedOrders + $releasedOrders + $openOrders;
@@ -31,7 +41,7 @@ class Dashboard2Controller extends ApiController
         // Completed orders: Shipped
         $completedOrders = $shippedOrders;
 
-        $avgFulfillmentRate = WarehouseOrderLine::where('order_qty', '>', 0)
+        $avgFulfillmentRate = (clone $query)->where('order_qty', '>', 0)
             ->selectRaw('AVG((ship_qty / order_qty) * 100) as avg_fulfillment_rate')
             ->value('avg_fulfillment_rate');
 
@@ -47,7 +57,8 @@ class Dashboard2Controller extends ApiController
                 'released' => $releasedOrders,
                 'open' => $openOrders,
                 'shipped' => $shippedOrders
-            ]
+            ],
+            'filter_metadata' => $this->getPeriodMetadata($request, 'order_date')
         ]);
     }
 
@@ -139,9 +150,23 @@ class Dashboard2Controller extends ApiController
 
     /**
      * Chart 2.5: Daily Order Volume - Line Chart with Area
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: daily
+     * - trx_type: Filter by transaction type
+     * - ship_from: Filter by source warehouse
+     * - date_from: Start date filter (order_date)
+     * - date_to: End date filter (order_date)
      */
     public function dailyOrderVolume(Request $request): JsonResponse
     {
+        $period = $request->get('period', 'daily');
+
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'daily';
+        }
+
         $query = WarehouseOrderLine::query();
 
         if ($request->has('trx_type')) {
@@ -150,31 +175,44 @@ class Dashboard2Controller extends ApiController
         if ($request->has('ship_from')) {
             $query->where('ship_from', $request->ship_from);
         }
-        if ($request->has('date_from')) {
-            $query->where('order_date', '>=', $request->date_from);
-        }
-        if ($request->has('date_to')) {
-            $query->where('order_date', '<=', $request->date_to);
-        }
 
-        $data = $query->select('order_date')
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'order_date');
+
+        // Get date format based on period
+        $dateFormat = $this->getDateFormatByPeriod($period, 'order_date', $query);
+
+        $data = $query->selectRaw("$dateFormat as period_date")
             ->selectRaw('SUM(order_qty) as total_order_qty')
             ->selectRaw('SUM(ship_qty) as total_ship_qty')
             ->selectRaw('SUM(order_qty - ship_qty) as gap_qty')
             ->selectRaw('COUNT(*) as order_count')
-            ->groupBy('order_date')
-            ->orderBy('order_date')
+            ->groupByRaw($dateFormat)
+            ->orderByRaw($dateFormat)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'order_date')
+        ]);
     }
 
     /**
      * Chart 2.6: Order Fulfillment Rate - Bar Chart with Target Line
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (order_date)
+     * - date_to: End date filter (order_date)
      */
-    public function orderFulfillmentRate(): JsonResponse
+    public function orderFulfillmentRate(Request $request): JsonResponse
     {
-        $data = WarehouseOrderLine::select('ship_from')
+        $query = WarehouseOrderLine::query();
+
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'order_date');
+
+        $data = $query->select('ship_from')
             ->selectRaw('SUM(order_qty) as total_order_qty')
             ->selectRaw('SUM(ship_qty) as total_ship_qty')
             ->selectRaw('ROUND((SUM(ship_qty) / SUM(order_qty)) * 100, 2) as fulfillment_rate')
@@ -185,18 +223,29 @@ class Dashboard2Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'target_rate' => 100
+            'target_rate' => 100,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'order_date')
         ]);
     }
 
     /**
      * Chart 2.7: Top Items Moved - Horizontal Bar Chart
+     *
+     * Query Parameters:
+     * - limit: Number of records to return (default: 20)
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (order_date)
+     * - date_to: End date filter (order_date)
      */
     public function topItemsMoved(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 20);
+        $query = WarehouseOrderLine::query();
 
-        $data = WarehouseOrderLine::select([
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'order_date');
+
+        $data = $query->select([
                 'item_code',
                 'item_desc'
             ])
@@ -208,7 +257,10 @@ class Dashboard2Controller extends ApiController
             ->limit($limit)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'order_date')
+        ]);
     }
 
     /**
@@ -246,6 +298,8 @@ class Dashboard2Controller extends ApiController
                 WHEN MAX(receipt_date) > MIN(delivery_date) THEN "delayed"
                 ELSE "pending"
             END as status')
+            ->where('order_no', 'NOT LIKE', 'SL%')
+            ->where('order_no', 'NOT LIKE', 'SE%')
             ->groupBy([
                 'order_no',
                 'ship_from',
@@ -283,7 +337,10 @@ class Dashboard2Controller extends ApiController
             ->limit($limit)
             ->get();
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'order_date')
+        ]);
     }
 
     /**
@@ -324,7 +381,7 @@ class Dashboard2Controller extends ApiController
             END as delivery_status')
             ->selectRaw('CASE
                 WHEN receipt_date IS NOT NULL AND delivery_date IS NOT NULL
-                THEN DATEDIFF(receipt_date, delivery_date)
+                THEN DATEDIFF(day, delivery_date, receipt_date)
                 ELSE NULL
             END as days_difference')
             ->selectRaw('CASE
@@ -422,12 +479,12 @@ class Dashboard2Controller extends ApiController
     public function getAllData(Request $request): JsonResponse
     {
         return response()->json([
-            'warehouse_order_summary' => $this->warehouseOrderSummary()->getData(true),
+            'warehouse_order_summary' => $this->warehouseOrderSummary($request)->getData(true),
             'order_flow_analysis' => $this->orderFlowAnalysis()->getData(true),
             'delivery_performance' => $this->deliveryPerformance()->getData(true),
             'order_status_distribution' => $this->orderStatusDistribution($request)->getData(true),
             'daily_order_volume' => $this->dailyOrderVolume($request)->getData(true),
-            'order_fulfillment_rate' => $this->orderFulfillmentRate()->getData(true),
+            'order_fulfillment_rate' => $this->orderFulfillmentRate($request)->getData(true),
             'top_items_moved' => $this->topItemsMoved($request)->getData(true),
             'warehouse_order_timeline' => $this->warehouseOrderTimeline($request)->getData(true)
         ]);

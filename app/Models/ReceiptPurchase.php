@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class ReceiptPurchase extends Model
 {
+    protected $connection = 'erp';
     protected $table = 'data_receipt_purchase';
     public $timestamps = false;
 
