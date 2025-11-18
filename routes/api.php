@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\Dashboard5Controller;
 use App\Http\Controllers\Api\Dashboard6Controller;
 use App\Http\Controllers\Api\Dashboard7Controller;
 use App\Http\Controllers\Api\Dashboard8Controller;
+use App\Http\Controllers\Api\Dashboard1RevisionController;
 
 /*
 |--------------------------------------------------------------------------
@@ -78,6 +79,23 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/stock-movement-trend', [Dashboard1Controller::class, 'stockMovementTrend']);
         Route::get('/debug-stock-count', [Dashboard1Controller::class, 'debugStockCount']);
         Route::get('/all-data', [Dashboard1Controller::class, 'getAllData']);
+    });
+
+    // Dashboard 1 Revision: Inventory Management & Stock Control
+    Route::prefix('inventory-rev')->group(function () {
+        Route::get('/kpi', [Dashboard1RevisionController::class, 'comprehensiveKpi']);
+        Route::get('/stock-health-distribution', [Dashboard1RevisionController::class, 'stockHealthDistribution']);
+        Route::get('/stock-movement-trend', [Dashboard1RevisionController::class, 'stockMovementTrend']);
+        Route::get('/top-critical-items', [Dashboard1RevisionController::class, 'topCriticalItems']);
+        Route::get('/most-active-items', [Dashboard1RevisionController::class, 'mostActiveItems']);
+        Route::get('/stock-and-activity-by-product-type', [Dashboard1RevisionController::class, 'stockActivityByProductType']);
+        Route::get('/stock-by-customer', [Dashboard1RevisionController::class, 'stockByCustomer']);
+        Route::get('/receipt-vs-shipment-trend', [Dashboard1RevisionController::class, 'receiptVsShipmentTrend']);
+        Route::get('/transaction-type-distribution', [Dashboard1RevisionController::class, 'transactionTypeDistribution']);
+        Route::get('/fast-vs-slow-moving', [Dashboard1RevisionController::class, 'fastVsSlowMoving']);
+        Route::get('/stock-turnover-rate', [Dashboard1RevisionController::class, 'stockTurnoverRate']);
+        Route::get('/recent-transaction-history', [Dashboard1RevisionController::class, 'recentTransactionHistory']);
+        Route::get('/all-data', [Dashboard1RevisionController::class, 'getAllData']);
     });
 
     // Dashboard 2: Warehouse Operations

@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class SoInvoiceLine extends Model
 {
-    protected $connection = 'erp';
+    protected $connection = 'mysql';
     protected $table = 'so_invoice_line';
     public $timestamps = false;
 

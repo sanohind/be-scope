@@ -5,22 +5,59 @@ namespace App\Console\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use App\Models\SyncLog;
+use Carbon\Carbon;
 use Exception;
 
 class SyncErpData extends Command
 {
-    protected $signature = 'sync:erp-data {--manual : Manual sync flag}';
+    protected $signature = 'sync:erp-data
+                            {--manual : Manual sync flag}
+                            {--month= : Month to sync (format: YYYY-MM, e.g., 2025-08). Only used with --manual}
+                            {--init : Initialize sync (sync all data from both ERP and ERP2)}';
     protected $description = 'Sync ERP data to local database';
+
+    private $isInitialization = false;
+    private $syncMonth = null;
+    private $dateFrom = null;
+    private $dateTo = null;
 
     public function handle()
     {
         // Increase memory limit for large datasets
         ini_set('memory_limit', '1024M');
-        
-        $isManual = $this->option('manual');
-        $syncType = $isManual ? 'manual' : 'scheduled';
 
-        $this->info("Starting {$syncType} sync...");
+        $isManual = $this->option('manual');
+        $isInit = $this->option('init');
+        $monthOption = $this->option('month');
+
+        // Determine sync type
+        if ($isInit) {
+            $this->isInitialization = true;
+            $syncType = 'initialization';
+            $this->info("Starting initialization sync (all data from ERP and ERP2)...");
+        } else {
+            $syncType = $isManual ? 'manual' : 'scheduled';
+
+            // Determine date range
+            if ($isManual && $monthOption) {
+                // Manual sync with specific month
+                try {
+                    $this->syncMonth = Carbon::createFromFormat('Y-m', $monthOption);
+                    $this->dateFrom = $this->syncMonth->copy()->startOfMonth();
+                    $this->dateTo = $this->syncMonth->copy()->endOfMonth();
+                    $this->info("Starting manual sync for month: {$monthOption}");
+                } catch (Exception $e) {
+                    $this->error("Invalid month format. Use YYYY-MM (e.g., 2025-08)");
+                    return 1;
+                }
+            } else {
+                // Scheduled sync - current month only
+                $this->syncMonth = Carbon::now();
+                $this->dateFrom = $this->syncMonth->copy()->startOfMonth();
+                $this->dateTo = $this->syncMonth->copy()->endOfMonth();
+                $this->info("Starting scheduled sync for current month: {$this->syncMonth->format('Y-m')}");
+            }
+        }
 
         // Create sync log BEFORE disabling query log
         $syncLog = SyncLog::create([
@@ -31,9 +68,9 @@ class SyncErpData extends Command
             'success_records' => 0,
             'failed_records' => 0,
         ]);
-        
+
         $this->info("Sync Log ID: {$syncLog->id}");
-        
+
         // Disable query logging to save memory (only for ERP connections)
         DB::connection('erp')->disableQueryLog();
         DB::connection('erp2')->disableQueryLog();
@@ -64,7 +101,7 @@ class SyncErpData extends Command
             $successRecords += $result['success'];
             $failedRecords += $result['failed'];
 
-            // Sync SoInvoiceLine
+            // Sync SoInvoiceLine (merged with SoInvoiceLine2)
             $this->info('Syncing SoInvoiceLine...');
             $result = $this->syncSoInvoiceLine();
             $totalRecords += $result['total'];
@@ -85,9 +122,9 @@ class SyncErpData extends Command
             $successRecords += $result['success'];
             $failedRecords += $result['failed'];
 
-            // Sync SoInvoiceLine2 from ERP2
-            $this->info('Syncing SoInvoiceLine2 from ERP2...');
-            $result = $this->syncSoInvoiceLine2();
+            // Sync InventoryTransaction
+            $this->info('Syncing InventoryTransaction...');
+            $result = $this->syncInventoryTransaction();
             $totalRecords += $result['total'];
             $successRecords += $result['success'];
             $failedRecords += $result['failed'];
@@ -122,60 +159,150 @@ class SyncErpData extends Command
         return 0;
     }
 
+    /**
+     * Helper method to check if two records are the same
+     */
+    private function recordsAreEqual($record1, $record2, $fields)
+    {
+        foreach ($fields as $field) {
+            $val1 = $record1[$field] ?? null;
+            $val2 = $record2[$field] ?? null;
+
+            // Handle null comparison
+            if ($val1 === null && $val2 === null) {
+                continue;
+            }
+            if ($val1 === null || $val2 === null) {
+                return false;
+            }
+
+            // Compare values (handle numeric comparison)
+            if (is_numeric($val1) && is_numeric($val2)) {
+                if (abs((float)$val1 - (float)$val2) > 0.01) {
+                    return false;
+                }
+            } else {
+                if ((string)$val1 !== (string)$val2) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Helper method to perform upsert (insert or update)
+     */
+    private function upsertRecord($table, $record, $uniqueKeys)
+    {
+        $query = DB::table($table);
+
+        // Build where clause for unique keys
+        foreach ($uniqueKeys as $key) {
+            if (isset($record[$key])) {
+                $query->where($key, $record[$key]);
+            } else {
+                // If unique key is null, treat as new record
+                DB::table($table)->insert($record);
+                return ['action' => 'inserted', 'record' => $record];
+            }
+        }
+
+        $existing = $query->first();
+
+        if ($existing) {
+            // Check if data has changed
+            $existingArray = (array)$existing;
+            // Remove id from comparison if it exists
+            unset($existingArray['id']);
+            $allFields = array_keys($record);
+
+            if ($this->recordsAreEqual($existingArray, $record, $allFields)) {
+                // Data is the same, no update needed
+                return ['action' => 'skipped', 'record' => $existing];
+            } else {
+                // Data has changed, update it - rebuild query for update
+                $updateQuery = DB::table($table);
+                foreach ($uniqueKeys as $key) {
+                    $updateQuery->where($key, $record[$key]);
+                }
+                $updateQuery->update($record);
+                return ['action' => 'updated', 'record' => $record];
+            }
+        } else {
+            // New record, insert it
+            DB::table($table)->insert($record);
+            return ['action' => 'inserted', 'record' => $record];
+        }
+    }
+
     private function syncStockByWh()
     {
         try {
-            // Clear existing data
-            DB::table('stockbywh')->truncate();
-
             $success = 0;
             $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
             $total = 0;
             $chunkSize = 500;
 
+            // StockByWh unique key: warehouse + partno
+            $uniqueKeys = ['warehouse', 'partno'];
+
             // Process data in chunks to avoid memory issues
-            DB::connection('erp')->table('stockbywh')->orderBy('partno')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
-                $batch = [];
-                
+            DB::connection('erp')->table('stockbywh')->orderBy('partno')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
                 foreach ($records as $record) {
-                    $batch[] = [
-                        'warehouse' => $record->warehouse,
-                        'partno' => $record->partno,
-                        'desc' => $record->desc,
-                        'partname' => $record->partname,
-                        'oldpartno' => $record->oldpartno,
-                        'group' => $record->group,
-                        'groupkey' => $record->groupkey,
-                        'product_type' => $record->product_type,
-                        'model' => $record->model,
-                        'customer' => $record->customer,
-                        'onhand' => $record->onhand,
-                        'allocated' => $record->allocated,
-                        'onorder' => $record->onorder,
-                        'economicstock' => $record->economicstock,
-                        'safety_stock' => $record->safety_stock,
-                        'min_stock' => $record->min_stock,
-                        'max_stock' => $record->max_stock,
-                        'unit' => $record->unit,
-                        'location' => $record->location,
-                    ];
-                    $total++;
+                    try {
+                        $data = [
+                            'warehouse' => $record->warehouse,
+                            'partno' => $record->partno,
+                            'desc' => $record->desc,
+                            'partname' => $record->partname,
+                            'oldpartno' => $record->oldpartno,
+                            'group' => $record->group,
+                            'groupkey' => $record->groupkey,
+                            'product_type' => $record->product_type,
+                            'model' => $record->model,
+                            'customer' => $record->customer,
+                            'onhand' => $record->onhand,
+                            'allocated' => $record->allocated,
+                            'onorder' => $record->onorder,
+                            'economicstock' => $record->economicstock,
+                            'safety_stock' => $record->safety_stock,
+                            'min_stock' => $record->min_stock,
+                            'max_stock' => $record->max_stock,
+                            'unit' => $record->unit,
+                            'location' => $record->location,
+                        ];
+
+                        $result = $this->upsertRecord('stockbywh', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $this->warn("Failed to sync StockByWh record (warehouse: {$record->warehouse}, partno: {$record->partno}): " . $e->getMessage());
+                    }
                 }
 
-                try {
-                    DB::table('stockbywh')->insert($batch);
-                    $success += count($batch);
-                    $this->info("Processed " . number_format($total) . " StockByWh records...");
-                    
-                    // Free memory
-                    unset($batch);
-                    gc_collect_cycles();
-                } catch (Exception $e) {
-                    $failed += count($batch);
-                    $this->warn("Failed to insert stockbywh batch: " . $e->getMessage());
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " StockByWh records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
                 }
+
+                gc_collect_cycles();
             });
 
+            $this->info("StockByWh sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
             return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
@@ -187,45 +314,68 @@ class SyncErpData extends Command
     private function syncWarehouseOrder()
     {
         try {
-            DB::table('view_warehouse_order')->truncate();
-
             $success = 0;
             $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
             $total = 0;
             $chunkSize = 500;
 
-            DB::connection('erp')->table('view_warehouse_order')->orderBy('order_origin_code')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
-                $batch = [];
-                
+            // WarehouseOrder unique key: order_origin_code
+            $uniqueKeys = ['order_origin_code'];
+
+            $query = DB::connection('erp')->table('view_warehouse_order');
+
+            // Apply date filter if not initialization
+            if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+                $query->whereBetween('order_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            }
+
+            $query->orderBy('order_origin_code')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
                 foreach ($records as $record) {
-                    $batch[] = [
-                        'order_origin_code' => $record->order_origin_code,
-                        'order_origin' => $record->order_origin,
-                        'trx_type' => $record->trx_type,
-                        'order_date' => $record->order_date,
-                        'plan_delivery_date' => $record->plan_delivery_date,
-                        'ship_from_type' => $record->ship_from_type,
-                        'ship_from' => $record->ship_from,
-                        'ship_from_desc' => $record->ship_from_desc,
-                        'ship_to_type' => $record->ship_to_type,
-                        'ship_to' => $record->ship_to,
-                        'ship_to_desc' => $record->ship_to_desc,
-                    ];
-                    $total++;
+                    try {
+                        $data = [
+                            'order_origin_code' => $record->order_origin_code,
+                            'order_origin' => $record->order_origin,
+                            'trx_type' => $record->trx_type,
+                            'order_date' => $record->order_date,
+                            'plan_delivery_date' => $record->plan_delivery_date,
+                            'ship_from_type' => $record->ship_from_type,
+                            'ship_from' => $record->ship_from,
+                            'ship_from_desc' => $record->ship_from_desc,
+                            'ship_to_type' => $record->ship_to_type,
+                            'ship_to' => $record->ship_to,
+                            'ship_to_desc' => $record->ship_to_desc,
+                        ];
+
+                        $result = $this->upsertRecord('view_warehouse_order', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $this->warn("Failed to sync WarehouseOrder record (order_origin_code: {$record->order_origin_code}): " . $e->getMessage());
+                    }
                 }
 
-                try {
-                    DB::table('view_warehouse_order')->insert($batch);
-                    $success += count($batch);
-                    $this->info("Processed " . number_format($total) . " WarehouseOrder records...");
-                    unset($batch);
-                    gc_collect_cycles();
-                } catch (Exception $e) {
-                    $failed += count($batch);
-                    $this->warn("Failed to insert warehouse order batch: " . $e->getMessage());
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " WarehouseOrder records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
                 }
+
+                gc_collect_cycles();
             });
 
+            $this->info("WarehouseOrder sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
             return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
@@ -237,56 +387,79 @@ class SyncErpData extends Command
     private function syncWarehouseOrderLine()
     {
         try {
-            DB::table('view_warehouse_order_line')->truncate();
-
             $success = 0;
             $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
             $total = 0;
             $chunkSize = 500;
 
-            DB::connection('erp')->table('view_warehouse_order_line')->orderBy('order_origin_code')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
-                $batch = [];
-                
+            // WarehouseOrderLine unique key: order_origin_code + line_no
+            $uniqueKeys = ['order_origin_code', 'line_no'];
+
+            $query = DB::connection('erp')->table('view_warehouse_order_line');
+
+            // Apply date filter if not initialization
+            if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+                $query->whereBetween('order_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            }
+
+            $query->orderBy('order_origin_code')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
                 foreach ($records as $record) {
-                    $batch[] = [
-                        'order_origin_code' => $record->order_origin_code,
-                        'order_origin' => $record->order_origin,
-                        'trx_type' => $record->trx_type,
-                        'order_date' => $record->order_date,
-                        'delivery_date' => $record->delivery_date,
-                        'receipt_date' => $record->receipt_date,
-                        'order_no' => $record->order_no,
-                        'line_no' => $record->line_no,
-                        'ship_from_type' => $record->ship_from_type,
-                        'ship_from' => $record->ship_from,
-                        'ship_from_desc' => $record->ship_from_desc,
-                        'ship_to_type' => $record->ship_to_type,
-                        'ship_to' => $record->ship_to,
-                        'ship_to_desc' => $record->ship_to_desc,
-                        'item_code' => $record->item_code,
-                        'item_desc' => $record->item_desc,
-                        'item_desc2' => $record->item_desc2,
-                        'order_qty' => $record->order_qty,
-                        'ship_qty' => $record->ship_qty,
-                        'unit' => $record->unit,
-                        'line_status_code' => $record->line_status_code,
-                        'line_status' => $record->line_status,
-                    ];
-                    $total++;
+                    try {
+                        $data = [
+                            'order_origin_code' => $record->order_origin_code,
+                            'order_origin' => $record->order_origin,
+                            'trx_type' => $record->trx_type,
+                            'order_date' => $record->order_date,
+                            'delivery_date' => $record->delivery_date,
+                            'receipt_date' => $record->receipt_date,
+                            'order_no' => $record->order_no,
+                            'line_no' => $record->line_no,
+                            'ship_from_type' => $record->ship_from_type,
+                            'ship_from' => $record->ship_from,
+                            'ship_from_desc' => $record->ship_from_desc,
+                            'ship_to_type' => $record->ship_to_type,
+                            'ship_to' => $record->ship_to,
+                            'ship_to_desc' => $record->ship_to_desc,
+                            'item_code' => $record->item_code,
+                            'item_desc' => $record->item_desc,
+                            'item_desc2' => $record->item_desc2,
+                            'order_qty' => $record->order_qty,
+                            'ship_qty' => $record->ship_qty,
+                            'unit' => $record->unit,
+                            'line_status_code' => $record->line_status_code,
+                            'line_status' => $record->line_status,
+                        ];
+
+                        $result = $this->upsertRecord('view_warehouse_order_line', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $this->warn("Failed to sync WarehouseOrderLine record (order_origin_code: {$record->order_origin_code}, line_no: {$record->line_no}): " . $e->getMessage());
+                    }
                 }
 
-                try {
-                    DB::table('view_warehouse_order_line')->insert($batch);
-                    $success += count($batch);
-                    $this->info("Processed " . number_format($total) . " WarehouseOrderLine records...");
-                    unset($batch);
-                    gc_collect_cycles();
-                } catch (Exception $e) {
-                    $failed += count($batch);
-                    $this->warn("Failed to insert warehouse order line batch: " . $e->getMessage());
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " WarehouseOrderLine records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
                 }
+
+                gc_collect_cycles();
             });
 
+            $this->info("WarehouseOrderLine sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
             return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
@@ -298,18 +471,68 @@ class SyncErpData extends Command
     private function syncSoInvoiceLine()
     {
         try {
-            DB::table('so_invoice_line')->truncate();
-
             $success = 0;
             $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
             $total = 0;
             $chunkSize = 500;
 
-            DB::connection('erp')->table('so_invoice_line')->orderBy('sales_order')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
-                $batch = [];
-                
-                foreach ($records as $record) {
-                    $batch[] = [
+            // SoInvoiceLine unique key: sales_order + so_line + invoice_no + inv_line
+            // If invoice_no is null, use sales_order + so_line
+            $uniqueKeys = ['sales_order', 'so_line'];
+
+            // Sync from ERP (10.1.10.52) - contains data from month 8 2025 onwards
+            $this->info('Syncing SoInvoiceLine from ERP...');
+            $result = $this->syncSoInvoiceLineFromSource('erp', $uniqueKeys, $chunkSize, $success, $failed, $updated, $inserted, $skipped, $total);
+            $success = $result['success'];
+            $failed = $result['failed'];
+            $updated = $result['updated'];
+            $inserted = $result['inserted'];
+            $skipped = $result['skipped'];
+            $total = $result['total'];
+
+            // Sync from ERP2 (10.1.10.50) - only during initialization (contains historical data)
+            if ($this->isInitialization) {
+                $this->info('Syncing SoInvoiceLine from ERP2 (historical data)...');
+                $result = $this->syncSoInvoiceLineFromSource('erp2', $uniqueKeys, $chunkSize, $success, $failed, $updated, $inserted, $skipped, $total);
+                $success = $result['success'];
+                $failed = $result['failed'];
+                $updated = $result['updated'];
+                $inserted = $result['inserted'];
+                $skipped = $result['skipped'];
+                $total = $result['total'];
+            }
+
+            $this->info("SoInvoiceLine sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
+
+        } catch (Exception $e) {
+            $this->error("Error syncing SoInvoiceLine: " . $e->getMessage());
+            return ['total' => 0, 'success' => 0, 'failed' => 0];
+        }
+    }
+
+    /**
+     * Helper method to sync SoInvoiceLine from a specific source (erp or erp2)
+     */
+    private function syncSoInvoiceLineFromSource($connection, $uniqueKeys, $chunkSize, &$success, &$failed, &$updated, &$inserted, &$skipped, &$total)
+    {
+        $query = DB::connection($connection)->table('so_invoice_line');
+
+        // Apply date filter if not initialization
+        if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+            $query->where(function($q) {
+                $q->whereBetween('so_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')])
+                  ->orWhereBetween('invoice_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            });
+        }
+
+        $query->orderBy('sales_order')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
+            foreach ($records as $record) {
+                try {
+                    $data = [
                         'bp_code' => $record->bp_code,
                         'bp_name' => $record->bp_name,
                         'sales_order' => $record->sales_order,
@@ -320,15 +543,15 @@ class SyncErpData extends Command
                         'shipment' => $record->shipment,
                         'shipment_line' => $record->shipment_line,
                         'delivery_date' => $record->delivery_date,
-                        'receipt' => $record->receipt,
-                        'receipt_line' => $record->receipt_line,
-                        'receipt_date' => $record->receipt_date,
+                        'receipt' => $record->receipt ?? null,
+                        'receipt_line' => $record->receipt_line ?? null,
+                        'receipt_date' => $record->receipt_date ?? null,
                         'part_no' => $record->part_no,
                         'old_partno' => $record->old_partno,
                         'product_type' => $record->product_type,
                         'cust_partno' => $record->cust_partno,
                         'cust_partname' => $record->cust_partname,
-                        'item_group' => $record->item_group,
+                        'item_group' => $record->item_group ?? null,
                         'delivered_qty' => $record->delivered_qty,
                         'unit' => $record->unit,
                         'shipment_reference' => $record->shipment_reference,
@@ -347,79 +570,116 @@ class SyncErpData extends Command
                         'invoice_status' => $record->invoice_status,
                         'dlv_log_date' => $record->dlv_log_date,
                     ];
+
+                    $result = $this->upsertRecord('so_invoice_line', $data, $uniqueKeys);
+
+                    if ($result['action'] === 'updated') {
+                        $updated++;
+                    } elseif ($result['action'] === 'inserted') {
+                        $inserted++;
+                    } else {
+                        $skipped++;
+                    }
+
+                    $success++;
                     $total++;
-                }
-
-                try {
-                    DB::table('so_invoice_line')->insert($batch);
-                    $success += count($batch);
-                    $this->info("Processed " . number_format($total) . " SoInvoiceLine records...");
-                    unset($batch);
-                    gc_collect_cycles();
                 } catch (Exception $e) {
-                    $failed += count($batch);
-                    $this->warn("Failed to insert so invoice line batch: " . $e->getMessage());
+                    $failed++;
+                    $total++;
+                    $this->warn("Failed to sync SoInvoiceLine record (sales_order: {$record->sales_order}, so_line: {$record->so_line}): " . $e->getMessage());
                 }
-            });
+            }
 
-            return ['total' => $total, 'success' => $success, 'failed' => $failed];
+            if ($total % 1000 == 0) {
+                $this->info("Processed " . number_format($total) . " SoInvoiceLine records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
+            }
 
-        } catch (Exception $e) {
-            $this->error("Error syncing SoInvoiceLine: " . $e->getMessage());
-            return ['total' => 0, 'success' => 0, 'failed' => 0];
-        }
+            gc_collect_cycles();
+        });
+
+        return [
+            'success' => $success,
+            'failed' => $failed,
+            'updated' => $updated,
+            'inserted' => $inserted,
+            'skipped' => $skipped,
+            'total' => $total
+        ];
     }
 
     private function syncProdHeader()
     {
         try {
-            DB::table('view_prod_header')->truncate();
-
             $success = 0;
             $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
             $total = 0;
             $chunkSize = 500;
 
-            DB::connection('erp')->table('view_prod_header')->orderBy('prod_index')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
-                $batch = [];
-                
+            // ProdHeader unique key: prod_index
+            $uniqueKeys = ['prod_index'];
+
+            $query = DB::connection('erp')->table('view_prod_header');
+
+            // Apply date filter if not initialization
+            if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+                $query->whereBetween('planning_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            }
+
+            $query->orderBy('prod_index')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
                 foreach ($records as $record) {
-                    $batch[] = [
-                        'prod_index' => $record->prod_index,
-                        'prod_no' => $record->prod_no,
-                        'planning_date' => $record->planning_date,
-                        'item' => $record->item,
-                        'old_partno' => $record->old_partno,
-                        'description' => $record->description,
-                        'mat_desc' => $record->mat_desc,
-                        'customer' => $record->customer,
-                        'model' => $record->model,
-                        'unique_no' => $record->unique_no,
-                        'sanoh_code' => $record->sanoh_code,
-                        'snp' => $record->snp,
-                        'sts' => $record->sts,
-                        'status' => $record->status,
-                        'qty_order' => $record->qty_order,
-                        'qty_delivery' => $record->qty_delivery,
-                        'qty_os' => $record->qty_os,
-                        'warehouse' => $record->warehouse,
-                        'divisi' => $record->divisi,
-                    ];
-                    $total++;
+                    try {
+                        $data = [
+                            'prod_index' => $record->prod_index,
+                            'prod_no' => $record->prod_no,
+                            'planning_date' => $record->planning_date,
+                            'item' => $record->item,
+                            'old_partno' => $record->old_partno,
+                            'description' => $record->description,
+                            'mat_desc' => $record->mat_desc,
+                            'customer' => $record->customer,
+                            'model' => $record->model,
+                            'unique_no' => $record->unique_no,
+                            'sanoh_code' => $record->sanoh_code,
+                            'snp' => $record->snp,
+                            'sts' => $record->sts,
+                            'status' => $record->status,
+                            'qty_order' => $record->qty_order,
+                            'qty_delivery' => $record->qty_delivery,
+                            'qty_os' => $record->qty_os,
+                            'warehouse' => $record->warehouse,
+                            'divisi' => $record->divisi,
+                        ];
+
+                        $result = $this->upsertRecord('view_prod_header', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $this->warn("Failed to sync ProdHeader record (prod_index: {$record->prod_index}): " . $e->getMessage());
+                    }
                 }
 
-                try {
-                    DB::table('view_prod_header')->insert($batch);
-                    $success += count($batch);
-                    $this->info("Processed " . number_format($total) . " ProdHeader records...");
-                    unset($batch);
-                    gc_collect_cycles();
-                } catch (Exception $e) {
-                    $failed += count($batch);
-                    $this->warn("Failed to insert prod header batch: " . $e->getMessage());
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " ProdHeader records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
                 }
+
+                gc_collect_cycles();
             });
 
+            $this->info("ProdHeader sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
             return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
@@ -431,74 +691,97 @@ class SyncErpData extends Command
     private function syncReceiptPurchase()
     {
         try {
-            DB::table('data_receipt_purchase')->truncate();
-
             $success = 0;
             $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
             $total = 0;
             $chunkSize = 500;
 
-            DB::connection('erp')->table('data_receipt_purchase')->orderBy('receipt_no')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
-                $batch = [];
-                
+            // ReceiptPurchase unique key: receipt_no + receipt_line
+            $uniqueKeys = ['receipt_no', 'receipt_line'];
+
+            $query = DB::connection('erp')->table('data_receipt_purchase');
+
+            // Apply date filter if not initialization
+            if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+                $query->whereBetween('actual_receipt_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            }
+
+            $query->orderBy('receipt_no')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
                 foreach ($records as $record) {
-                    $batch[] = [
-                        'po_no' => $record->po_no,
-                        'bp_id' => $record->bp_id,
-                        'bp_name' => $record->bp_name,
-                        'currency' => $record->currency,
-                        'po_type' => $record->po_type,
-                        'po_reference' => $record->po_reference,
-                        'po_line' => $record->po_line,
-                        'po_sequence' => $record->po_sequence,
-                        'po_receipt_sequence' => $record->po_receipt_sequence,
-                        'actual_receipt_date' => $record->actual_receipt_date,
-                        'actual_receipt_year' => $record->actual_receipt_year,
-                        'actual_receipt_period' => $record->actual_receipt_period,
-                        'receipt_no' => $record->receipt_no,
-                        'receipt_line' => $record->receipt_line,
-                        'gr_no' => $record->gr_no,
-                        'packing_slip' => $record->packing_slip,
-                        'item_no' => $record->item_no,
-                        'ics_code' => $record->ics_code,
-                        'ics_part' => $record->ics_part,
-                        'part_no' => $record->part_no,
-                        'item_desc' => $record->item_desc,
-                        'item_group' => $record->item_group,
-                        'item_type' => $record->item_type,
-                        'item_type_desc' => $record->item_type_desc,
-                        'request_qty' => $record->request_qty,
-                        'actual_receipt_qty' => $record->actual_receipt_qty,
-                        'approve_qty' => $record->approve_qty,
-                        'unit' => $record->unit,
-                        'receipt_amount' => $record->receipt_amount,
-                        'receipt_unit_price' => $record->receipt_unit_price,
-                        'is_final_receipt' => $this->convertToBoolean($record->is_final_receipt),
-                        'is_confirmed' => $this->convertToBoolean($record->is_confirmed),
-                        'inv_doc_no' => $record->inv_doc_no,
-                        'inv_doc_date' => $record->inv_doc_date,
-                        'inv_qty' => $record->inv_qty,
-                        'inv_amount' => $record->inv_amount,
-                        'inv_supplier_no' => $record->inv_supplier_no,
-                        'inv_due_date' => $record->inv_due_date,
-                        'payment_doc' => $record->payment_doc,
-                        'payment_doc_date' => $record->payment_doc_date,
-                    ];
-                    $total++;
+                    try {
+                        $data = [
+                            'po_no' => $record->po_no,
+                            'bp_id' => $record->bp_id,
+                            'bp_name' => $record->bp_name,
+                            'currency' => $record->currency,
+                            'po_type' => $record->po_type,
+                            'po_reference' => $record->po_reference,
+                            'po_line' => $record->po_line,
+                            'po_sequence' => $record->po_sequence,
+                            'po_receipt_sequence' => $record->po_receipt_sequence,
+                            'actual_receipt_date' => $record->actual_receipt_date,
+                            'actual_receipt_year' => $record->actual_receipt_year,
+                            'actual_receipt_period' => $record->actual_receipt_period,
+                            'receipt_no' => $record->receipt_no,
+                            'receipt_line' => $record->receipt_line,
+                            'gr_no' => $record->gr_no,
+                            'packing_slip' => $record->packing_slip,
+                            'item_no' => $record->item_no,
+                            'ics_code' => $record->ics_code,
+                            'ics_part' => $record->ics_part,
+                            'part_no' => $record->part_no,
+                            'item_desc' => $record->item_desc,
+                            'item_group' => $record->item_group,
+                            'item_type' => $record->item_type,
+                            'item_type_desc' => $record->item_type_desc,
+                            'request_qty' => $record->request_qty,
+                            'actual_receipt_qty' => $record->actual_receipt_qty,
+                            'approve_qty' => $record->approve_qty,
+                            'unit' => $record->unit,
+                            'receipt_amount' => $record->receipt_amount,
+                            'receipt_unit_price' => $record->receipt_unit_price,
+                            'is_final_receipt' => $this->convertToBoolean($record->is_final_receipt),
+                            'is_confirmed' => $this->convertToBoolean($record->is_confirmed),
+                            'inv_doc_no' => $record->inv_doc_no,
+                            'inv_doc_date' => $record->inv_doc_date,
+                            'inv_qty' => $record->inv_qty,
+                            'inv_amount' => $record->inv_amount,
+                            'inv_supplier_no' => $record->inv_supplier_no,
+                            'inv_due_date' => $record->inv_due_date,
+                            'payment_doc' => $record->payment_doc,
+                            'payment_doc_date' => $record->payment_doc_date,
+                        ];
+
+                        $result = $this->upsertRecord('data_receipt_purchase', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $this->warn("Failed to sync ReceiptPurchase record (receipt_no: {$record->receipt_no}, receipt_line: {$record->receipt_line}): " . $e->getMessage());
+                    }
                 }
 
-                try {
-                    DB::table('data_receipt_purchase')->insert($batch);
-                    $success += count($batch);
-                    $this->info("Processed " . number_format($total) . " ReceiptPurchase records...");
-                    unset($batch);
-                    gc_collect_cycles();
-                } catch (Exception $e) {
-                    $failed += count($batch);
-                    $this->warn("Failed to insert receipt purchase batch: " . $e->getMessage());
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " ReceiptPurchase records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
                 }
+
+                gc_collect_cycles();
             });
 
+            $this->info("ReceiptPurchase sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
             return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
@@ -507,75 +790,122 @@ class SyncErpData extends Command
         }
     }
 
-    private function syncSoInvoiceLine2()
+    private function syncInventoryTransaction()
     {
         try {
-            DB::table('so_invoice_line_2')->truncate();
-
             $success = 0;
             $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
             $total = 0;
             $chunkSize = 500;
 
-            DB::connection('erp2')->table('so_invoice_line')->orderBy('sales_order')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$total) {
-                $batch = [];
-                
-                foreach ($records as $record) {
-                    $batch[] = [
-                        'bp_code' => $record->bp_code,
-                        'bp_name' => $record->bp_name,
-                        'sales_order' => $record->sales_order,
-                        'so_date' => $record->so_date,
-                        'so_line' => $record->so_line,
-                        'so_sequence' => $record->so_sequence,
-                        'customer_po' => $record->customer_po,
-                        'shipment' => $record->shipment,
-                        'shipment_line' => $record->shipment_line,
-                        'delivery_date' => $record->delivery_date,
-                        'part_no' => $record->part_no,
-                        'old_partno' => $record->old_partno,
-                        'product_type' => $record->product_type,
-                        'cust_partno' => $record->cust_partno,
-                        'cust_partname' => $record->cust_partname,
-                        'delivered_qty' => $record->delivered_qty,
-                        'unit' => $record->unit,
-                        'shipment_reference' => $record->shipment_reference,
-                        'status' => $record->status,
-                        'shipment_status' => $record->shipment_status,
-                        'invoice_no' => $record->invoice_no,
-                        'inv_line' => $record->inv_line,
-                        'invoice_date' => $record->invoice_date,
-                        'invoice_qty' => $record->invoice_qty,
-                        'currency' => $record->currency,
-                        'price' => $record->price,
-                        'amount' => $record->amount,
-                        'price_hc' => $record->price_hc,
-                        'amount_hc' => $record->amount_hc,
-                        'inv_stat' => $record->inv_stat,
-                        'invoice_status' => $record->invoice_status,
-                        'dlv_log_date' => $record->dlv_log_date,
-                    ];
-                    $total++;
-                }
+            // InventoryTransaction unique key: trans_id
+            $uniqueKeys = ['trans_id'];
 
-                try {
-                    DB::table('so_invoice_line_2')->insert($batch);
-                    $success += count($batch);
-                    $this->info("Processed " . number_format($total) . " SoInvoiceLine2 records...");
-                    unset($batch);
-                    gc_collect_cycles();
-                } catch (Exception $e) {
-                    $failed += count($batch);
-                    $this->warn("Failed to insert so invoice line 2 batch: " . $e->getMessage());
-                }
-            });
+            // Sync from ERP (10.1.10.52) - contains data from month 8 2025 onwards
+            $this->info('Syncing InventoryTransaction from ERP...');
+            $result = $this->syncInventoryTransactionFromSource('erp', $uniqueKeys, $chunkSize, $success, $failed, $updated, $inserted, $skipped, $total);
+            $success = $result['success'];
+            $failed = $result['failed'];
+            $updated = $result['updated'];
+            $inserted = $result['inserted'];
+            $skipped = $result['skipped'];
+            $total = $result['total'];
 
+            // Sync from ERP2 (10.1.10.50) - only during initialization (contains historical data)
+            if ($this->isInitialization) {
+                $this->info('Syncing InventoryTransaction from ERP2 (historical data)...');
+                $result = $this->syncInventoryTransactionFromSource('erp2', $uniqueKeys, $chunkSize, $success, $failed, $updated, $inserted, $skipped, $total);
+                $success = $result['success'];
+                $failed = $result['failed'];
+                $updated = $result['updated'];
+                $inserted = $result['inserted'];
+                $skipped = $result['skipped'];
+                $total = $result['total'];
+            }
+
+            $this->info("InventoryTransaction sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
             return ['total' => $total, 'success' => $success, 'failed' => $failed];
 
         } catch (Exception $e) {
-            $this->error("Error syncing SoInvoiceLine2: " . $e->getMessage());
+            $this->error("Error syncing InventoryTransaction: " . $e->getMessage());
             return ['total' => 0, 'success' => 0, 'failed' => 0];
         }
+    }
+
+    /**
+     * Helper method to sync InventoryTransaction from a specific source (erp or erp2)
+     */
+    private function syncInventoryTransactionFromSource($connection, $uniqueKeys, $chunkSize, &$success, &$failed, &$updated, &$inserted, &$skipped, &$total)
+    {
+        $query = DB::connection($connection)->table('inventory_transaction');
+
+        // Apply date filter if not initialization
+        if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+            $query->where(function($q) {
+                $q->whereBetween('trans_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')])
+                  ->orWhereBetween('trans_date2', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            });
+        }
+
+        $query->orderBy('trans_id')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
+            foreach ($records as $record) {
+                try {
+                    $data = [
+                        'partno' => $record->partno,
+                        'part_desc' => $record->part_desc,
+                        'std_oldpart' => $record->std_oldpart,
+                        'warehouse' => $record->warehouse,
+                        'trans_date' => $record->trans_date,
+                        'trans_date2' => $record->trans_date2,
+                        'lotno' => $record->lotno,
+                        'trans_id' => $record->trans_id,
+                        'qty' => $record->qty,
+                        'qty_hand' => $record->qty_hand,
+                        'trans_type' => $record->trans_type,
+                        'order_type' => $record->order_type,
+                        'order_no' => $record->order_no,
+                        'receipt' => $record->receipt,
+                        'shipment' => $record->shipment,
+                        'user' => $record->user,
+                    ];
+
+                    $result = $this->upsertRecord('inventory_transaction', $data, $uniqueKeys);
+
+                    if ($result['action'] === 'updated') {
+                        $updated++;
+                    } elseif ($result['action'] === 'inserted') {
+                        $inserted++;
+                    } else {
+                        $skipped++;
+                    }
+
+                    $success++;
+                    $total++;
+                } catch (Exception $e) {
+                    $failed++;
+                    $total++;
+                    $this->warn("Failed to sync InventoryTransaction record (trans_id: {$record->trans_id}): " . $e->getMessage());
+                }
+            }
+
+            if ($total % 1000 == 0) {
+                $this->info("Processed " . number_format($total) . " InventoryTransaction records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
+            }
+
+            gc_collect_cycles();
+        });
+
+        return [
+            'success' => $success,
+            'failed' => $failed,
+            'updated' => $updated,
+            'inserted' => $inserted,
+            'skipped' => $skipped,
+            'total' => $total
+        ];
     }
 
     /**

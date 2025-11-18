@@ -6,6 +6,15 @@
 
 ```
 INFO  No scheduled commands are ready to run.
+
+# Inisialisasi
+php artisan sync:erp-data --init
+
+# Scheduled sync (bulan berjalan)
+php artisan sync:erp-data
+
+# Manual sync untuk bulan tertentu
+php artisan sync:erp-data --manual --month=2025-08
 ```
 
 **Ini BUKAN error!** Artinya scheduler sudah berjalan dengan benar, tetapi command belum waktunya dieksekusi.
