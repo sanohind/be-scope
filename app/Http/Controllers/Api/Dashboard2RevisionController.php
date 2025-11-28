@@ -9,7 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
 
-class Dashboard2Controller extends ApiController
+class Dashboard2RevisionController extends ApiController
 {
     /**
      * Get warehouse parameter from request or throw error
@@ -193,14 +193,15 @@ class Dashboard2Controller extends ApiController
         $warehouseCodes = $warehouseSelection['codes'];
         $dateRange = $this->getDateRange($request, 30);
 
-        $data = DB::table('view_warehouse_order_line')
-            ->select(['trx_type', 'line_status'])
+        $data = DB::connection('erp')
+            ->table('view_warehouse_order')
+            ->select(['order_origin', 'status_desc'])
             ->selectRaw('COUNT(*) as count')
             ->whereIn('ship_from', $warehouseCodes)
             ->whereBetween('order_date', [$dateRange['date_from'], $dateRange['date_to']])
-            ->groupBy(['trx_type', 'line_status'])
+            ->groupBy(['order_origin', 'status_desc'])
             ->get()
-            ->groupBy('trx_type')
+            ->groupBy('order_origin')
             ->map(function ($group) {
                 $total = $group->sum('count');
                 return $group->map(function ($item) use ($total) {

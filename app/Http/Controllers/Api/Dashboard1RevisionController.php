@@ -33,17 +33,17 @@ class Dashboard1RevisionController extends ApiController
     /**
      * Get date range parameters from request
      * Returns array with date_from and date_to
-     * Default: last 30 days if not specified
+     * Default: current month if not specified
      */
     private function getDateRange(Request $request, int $defaultDays = 30): array
     {
         $dateFrom = $request->input('date_from');
         $dateTo = $request->input('date_to');
 
-        // If no dates provided, use default
+        // If no dates provided, use current month
         if (!$dateFrom && !$dateTo) {
+            $dateFrom = Carbon::now()->startOfMonth();
             $dateTo = Carbon::now();
-            $dateFrom = Carbon::now()->subDays($defaultDays);
         } else {
             // Parse provided dates
             $dateFrom = $dateFrom ? Carbon::parse($dateFrom) : Carbon::now()->subDays($defaultDays);
@@ -197,10 +197,10 @@ class Dashboard1RevisionController extends ApiController
                 CAST(trans_date AS DATE) as date,
                 SUM(CASE WHEN receipt IS NOT NULL AND receipt != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as total_receipt,
                 SUM(CASE WHEN shipment IS NOT NULL AND shipment != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as total_shipment,
-                SUM(CASE 
+                SUM(CASE
                     WHEN receipt IS NOT NULL AND receipt != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2))
                     WHEN shipment IS NOT NULL AND shipment != '' THEN -TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2))
-                    ELSE 0 
+                    ELSE 0
                 END) as net_movement,
                 COUNT(trans_id) as trans_count
             FROM inventory_transaction
@@ -228,50 +228,77 @@ class Dashboard1RevisionController extends ApiController
     }
 
     /**
-     * CHART 4: Top 15 Critical Items with Transaction History
-     * Data table with sparkline data
-     * DATE FILTER: Applied to transaction summary (default 7 days for sparkline)
+     * CHART 4: Top 15 Items Without Issue Activity
+     * Highlights SKUs with large on-hand quantity but little to no "Issue" transactions
+     * DATE FILTER: Applied to transaction summary (default 90 days)
      */
     public function topCriticalItems(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 7); // Default 7 days for activity
+        $dateRange = $this->getDateRange($request, 90);
+        $dateFromInput = $request->input('date_from');
+        $dateToInput = $request->input('date_to');
 
+        $dateFilterClause = '';
+        $dateFilterParams = [];
+
+        if ($dateFromInput || $dateToInput) {
+            $dateFilterClause = "
+                AND COALESCE(t.trans_date2, t.trans_date) >= ?
+                AND COALESCE(t.trans_date2, t.trans_date) <= ?
+            ";
+            $dateFilterParams = [$dateRange['date_from'], $dateRange['date_to']];
+        }
+
+        $issueSummaryParams = array_merge([$warehouse], $dateFilterParams);
         $data = DB::connection('erp')->select("
-            WITH transaction_summary AS (
+            WITH issue_summary AS (
                 SELECT
-                    partno,
-                    COUNT(trans_id) as trans_count,
-                    SUM(CASE WHEN shipment IS NOT NULL AND shipment != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as shipment_total,
-                    MAX(trans_date) as last_trans_date
-                FROM inventory_transaction
-                WHERE warehouse = ?
-                    AND trans_date >= ?
-                    AND trans_date <= ?
-                GROUP BY partno
+                    t.partno,
+                    COUNT(
+                        CASE
+                            WHEN t.trans_type = 'Issue'
+                                OR (t.shipment IS NOT NULL AND t.shipment != '')
+                            THEN 1
+                        END
+                    ) as issue_count,
+                    SUM(CASE
+                        WHEN t.trans_type = 'Issue'
+                            OR (t.shipment IS NOT NULL AND t.shipment != '')
+                        THEN TRY_CAST(ISNULL(t.qty, 0) AS DECIMAL(18,2))
+                        ELSE 0
+                    END) as total_issue_qty,
+                    MAX(CASE
+                        WHEN t.trans_type = 'Issue'
+                            OR (t.shipment IS NOT NULL AND t.shipment != '')
+                        THEN COALESCE(t.trans_date2, t.trans_date)
+                        ELSE NULL
+                    END) as last_issue_date
+                FROM inventory_transaction t
+                WHERE t.warehouse = ?
+                    $dateFilterClause
+                GROUP BY t.partno
             )
             SELECT TOP 15
                 s.partno,
                 s.[desc] as description,
                 s.product_type,
-                s.onhand,
-                s.safety_stock,
-                s.min_stock,
-                (s.safety_stock - s.onhand) as gap,
-                s.location,
-                ISNULL(ts.trans_count, 0) as trans_in_period,
-                ISNULL(ts.shipment_total, 0) as shipment_in_period,
-                ts.last_trans_date,
+                CAST(s.onhand AS DECIMAL(18,2)) as onhand,
+                CAST(ISNULL(isum.total_issue_qty, 0) AS DECIMAL(18,2)) as total_issue_qty,
+                ISNULL(isum.issue_count, 0) as issue_count,
+                isum.last_issue_date,
+                CAST(s.onhand - ISNULL(isum.total_issue_qty, 0) AS DECIMAL(18,2)) as qty_gap,
                 CASE
-                    WHEN s.onhand < s.min_stock THEN 'Critical'
-                    WHEN s.onhand < s.safety_stock THEN 'Low'
-                END as status
+                    WHEN ISNULL(isum.issue_count, 0) = 0 THEN 'No Issue Activity'
+                    WHEN ISNULL(isum.issue_count, 0) <= 2 THEN 'Low Issue Activity'
+                    ELSE 'Has Issue Activity'
+                END as activity_flag
             FROM stockbywh s
-            LEFT JOIN transaction_summary ts ON s.partno = ts.partno
+            LEFT JOIN issue_summary isum ON s.partno = isum.partno
             WHERE s.warehouse = ?
-                AND s.onhand < s.safety_stock
-            ORDER BY (s.safety_stock - s.onhand) DESC
-        ", [$warehouse, $dateRange['date_from'], $dateRange['date_to'], $warehouse]);
+                AND s.onhand > 0
+            ORDER BY qty_gap DESC, s.onhand DESC
+        ", array_merge($issueSummaryParams, [$warehouse]));
 
         return response()->json([
             'data' => $data,
@@ -284,8 +311,8 @@ class Dashboard1RevisionController extends ApiController
     }
 
     /**
-     * CHART 5: Top 15 Most Active Items
-     * Horizontal bar chart with high transaction frequency
+     * CHART 5: Top 15 Most Active Items & Top 15 Most Non-Active Items
+     * Horizontal bar chart with high transaction frequency + items with oldest last transaction
      * DATE FILTER: Applied to transaction analysis
      */
     public function mostActiveItems(Request $request): JsonResponse
@@ -293,7 +320,8 @@ class Dashboard1RevisionController extends ApiController
         $warehouse = $this->getWarehouse($request);
         $dateRange = $this->getDateRange($request, 30);
 
-        $data = DB::connection('erp')->select("
+        // Query for most active items (highest transaction count in date range)
+        $activeData = DB::connection('erp')->select("
             SELECT TOP 15
                 t.partno,
                 LEFT(t.part_desc, 30) as description,
@@ -303,6 +331,7 @@ class Dashboard1RevisionController extends ApiController
                 SUM(CASE WHEN t.shipment IS NOT NULL AND t.shipment != '' THEN TRY_CAST(ISNULL(t.qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as total_shipment,
                 s.onhand as current_onhand,
                 s.safety_stock,
+                MAX(t.trans_date) as last_trans_date,
                 CASE
                     WHEN s.onhand < s.safety_stock THEN 'At Risk'
                     WHEN s.onhand > s.max_stock THEN 'Overstock'
@@ -323,8 +352,48 @@ class Dashboard1RevisionController extends ApiController
             ORDER BY COUNT(t.trans_id) DESC
         ", [$warehouse, $dateRange['date_from'], $dateRange['date_to']]);
 
+        // Query for most non-active items (items with oldest last transaction date)
+        $nonActiveData = DB::connection('erp')->select("
+            WITH last_transaction AS (
+                SELECT
+                    partno,
+                    MAX(trans_date) as last_trans_date
+                FROM inventory_transaction
+                WHERE warehouse = ?
+                GROUP BY partno
+            )
+            SELECT TOP 15
+                s.partno,
+                LEFT(COALESCE(NULLIF(s.partname, ''), s.[desc]), 30) as description,
+                s.product_type,
+                0 as trans_count,
+                0 as total_receipt,
+                0 as total_shipment,
+                s.onhand as current_onhand,
+                s.safety_stock,
+                ISNULL(lt.last_trans_date, '1900-01-01') as last_trans_date,
+                CASE
+                    WHEN s.onhand < s.safety_stock THEN 'At Risk'
+                    WHEN s.onhand > s.max_stock THEN 'Overstock'
+                    ELSE 'Normal'
+                END as stock_status,
+                CASE
+                    WHEN ISNULL(lt.last_trans_date, '1900-01-01') < DATEADD(month, -6, GETDATE()) AND s.onhand < s.safety_stock THEN 'Critical Inactive'
+                    WHEN ISNULL(lt.last_trans_date, '1900-01-01') < DATEADD(month, -6, GETDATE()) THEN 'Long Inactive'
+                    WHEN ISNULL(lt.last_trans_date, '1900-01-01') < DATEADD(month, -3, GETDATE()) THEN 'Moderately Inactive'
+                    ELSE 'Recently Inactive'
+                END as activity_level,
+                DATEDIFF(day, ISNULL(lt.last_trans_date, '1900-01-01'), GETDATE()) as days_since_last_trans
+            FROM stockbywh s
+            LEFT JOIN last_transaction lt ON s.partno = lt.partno
+            WHERE s.warehouse = ?
+                AND s.onhand > 0
+            ORDER BY ISNULL(lt.last_trans_date, '1900-01-01') ASC
+        ", [$warehouse, $warehouse]);
+
         return response()->json([
-            'data' => $data,
+            'most_active_items' => $activeData,
+            'most_non_active_items' => $nonActiveData,
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
@@ -379,19 +448,19 @@ class Dashboard1RevisionController extends ApiController
     }
 
     /**
-     * CHART 7: Stock by Customer - Donut Chart
-     * Similar to Dashboard1Controller but with warehouse filter
+     * CHART 7: Stock by Group Type - Donut Chart
+     * Groups stock by group_type_desc with warehouse filter
      */
-    public function stockByCustomer(Request $request): JsonResponse
+    public function stockByGroupType(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
 
         $data = DB::connection('erp')->table('stockbywh')
-            ->select('customer')
+            ->select('group_type_desc')
             ->selectRaw('SUM(onhand) as total_onhand')
             ->selectRaw('COUNT(DISTINCT partno) as total_items')
             ->where('warehouse', $warehouse)
-            ->groupBy('customer')
+            ->groupBy('group_type_desc')
             ->orderBy('total_onhand', 'desc')
             ->get();
 
@@ -403,7 +472,7 @@ class Dashboard1RevisionController extends ApiController
             'summary' => [
                 'total_onhand' => $totalOnhand,
                 'total_items' => $totalItems,
-                'total_customers' => $data->count()
+                'total_group_types' => $data->count()
             ],
             'warehouse' => $warehouse
         ]);
@@ -426,10 +495,10 @@ class Dashboard1RevisionController extends ApiController
                 MIN(CAST(trans_date AS DATE)) as week_start,
                 SUM(CASE WHEN receipt IS NOT NULL AND receipt != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as total_receipt,
                 SUM(CASE WHEN shipment IS NOT NULL AND shipment != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as total_shipment,
-                SUM(CASE 
+                SUM(CASE
                     WHEN receipt IS NOT NULL AND receipt != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2))
                     WHEN shipment IS NOT NULL AND shipment != '' THEN -TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2))
-                    ELSE 0 
+                    ELSE 0
                 END) as net_movement,
                 COUNT(trans_id) as trans_count
             FROM inventory_transaction
@@ -731,12 +800,89 @@ class Dashboard1RevisionController extends ApiController
             'critical_items' => $this->topCriticalItems($request)->getData(true),
             'active_items' => $this->mostActiveItems($request)->getData(true),
             'product_type_analysis' => $this->stockActivityByProductType($request)->getData(true),
-            'customer_analysis' => $this->stockByCustomer($request)->getData(true),
+            'group_type_analysis' => $this->stockByGroupType($request)->getData(true),
             'receipt_shipment_trend' => $this->receiptVsShipmentTrend($request)->getData(true),
             'transaction_types' => $this->transactionTypeDistribution($request)->getData(true),
             'fast_slow_moving' => $this->fastVsSlowMoving($request)->getData(true),
-            'turnover_rate' => $this->stockTurnoverRate($request)->getData(true)
+            'turnover_rate' => $this->stockTurnoverRate($request)->getData(true),
+            'stock_level_table' => $this->stockLevelTable($request)->getData(true)
             // Note: Recent transactions excluded from bulk call due to pagination
+        ]);
+    }
+
+    /**
+     * TABLE: Stock Level Detail
+     * Provides paginated table for stock level monitoring
+     */
+    public function stockLevelTable(Request $request): JsonResponse
+    {
+        $warehouse = $this->getWarehouse($request);
+
+        $statusFilter = $request->input('status');
+        $search = $request->input('search');
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = min(200, max(10, (int) $request->input('per_page', 50)));
+        $offset = ($page - 1) * $perPage;
+
+        $statusCase = "
+            CASE
+                WHEN s.onhand < s.min_stock THEN 'Critical'
+                WHEN s.onhand < s.safety_stock THEN 'Low'
+                WHEN s.onhand > s.max_stock THEN 'Overstock'
+                ELSE 'Normal'
+            END
+        ";
+
+        $baseQuery = DB::connection('erp')
+            ->table('stockbywh as s')
+            ->where('s.warehouse', $warehouse);
+
+        if ($search) {
+            $baseQuery->where(function ($q) use ($search) {
+                $q->where('s.partno', 'LIKE', "%{$search}%")
+                    ->orWhere('s.partname', 'LIKE', "%{$search}%")
+                    ->orWhereRaw('s.[desc] LIKE ?', ["%{$search}%"]);
+            });
+        }
+
+        if ($statusFilter) {
+            $baseQuery->whereRaw("$statusCase = ?", [$statusFilter]);
+        }
+
+        $total = (clone $baseQuery)->count();
+
+        $data = (clone $baseQuery)
+            ->selectRaw("
+                s.partno,
+                COALESCE(NULLIF(s.partname, ''), s.[desc]) as part_name,
+                s.unit,
+                s.warehouse,
+                CAST(s.onhand AS DECIMAL(18,2)) as onhand,
+                CAST(s.min_stock AS DECIMAL(18,2)) as min_stock,
+                CAST(s.safety_stock AS DECIMAL(18,2)) as safety_stock,
+                CAST(s.max_stock AS DECIMAL(18,2)) as max_stock,
+                ($statusCase) as status
+            ")
+            ->orderByRaw("(s.safety_stock - s.onhand) DESC")
+            ->offset($offset)
+            ->limit($perPage)
+            ->get();
+
+        return response()->json([
+            'data' => $data,
+            'filters' => [
+                'warehouse' => $warehouse,
+                'status' => $statusFilter,
+                'search' => $search
+            ],
+            'pagination' => [
+                'total' => $total,
+                'per_page' => $perPage,
+                'current_page' => $page,
+                'last_page' => $perPage > 0 ? (int) ceil($total / $perPage) : 1,
+                'from' => $total > 0 ? $offset + 1 : 0,
+                'to' => min($offset + $perPage, $total)
+            ]
         ]);
     }
 }

@@ -3,12 +3,80 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\ProdHeader;
+use App\Models\ProdReport;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 
 class Dashboard3Controller extends ApiController
 {
+    private const VALID_DIVISIONS = ['NL', 'CH', 'PS', 'BZ', ' '];
+
+    /**
+     * Normalize and validate divisi filter input.
+     *
+     * @throws \Symfony\Component\HttpKernel\Exception\HttpException
+     */
+    private function resolveDivisionFilter(Request $request): array
+    {
+        $rawInput = $request->input('divisi');
+
+        if (is_null($rawInput) || $rawInput === '' || $rawInput === []) {
+            return [
+                'requested' => 'ALL',
+                'codes' => self::VALID_DIVISIONS,
+                'is_all' => true,
+            ];
+        }
+
+        if (is_string($rawInput)) {
+            $rawInput = explode(',', $rawInput);
+        } elseif (!is_array($rawInput)) {
+            $rawInput = [$rawInput];
+        }
+
+        $selected = array_values(array_unique(array_filter(array_map(function ($value) {
+            return strtoupper(trim((string) $value));
+        }, $rawInput))));
+
+        if (empty($selected)) {
+            return [
+                'requested' => 'ALL',
+                'codes' => self::VALID_DIVISIONS,
+                'is_all' => true,
+            ];
+        }
+
+        foreach ($selected as $code) {
+            if (!in_array($code, self::VALID_DIVISIONS, true)) {
+                abort(400, "Invalid divisi code: {$code}");
+            }
+        }
+
+        return [
+            'requested' => count($selected) === 1 ? $selected[0] : $selected,
+            'codes' => $selected,
+            'is_all' => count($selected) === count(self::VALID_DIVISIONS),
+        ];
+    }
+
+    private function getDivisiFilterMetadata(array $selection): array
+    {
+        return [
+            'requested' => $selection['requested'],
+            'applied' => $selection['codes'],
+            'available' => self::VALID_DIVISIONS,
+            'is_all' => $selection['is_all'],
+        ];
+    }
+
+    private function applyDivisiFilter($query, array $divisiCodes): void
+    {
+        if (!empty($divisiCodes)) {
+            $query->whereIn('divisi', $divisiCodes);
+        }
+    }
+
     /**
      * Chart 3.1: Production KPI Summary - KPI Cards
      *
@@ -19,7 +87,9 @@ class Dashboard3Controller extends ApiController
      */
     public function productionKpiSummary(Request $request): JsonResponse
     {
+        $divisiSelection = $this->resolveDivisionFilter($request);
         $query = ProdHeader::query();
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Apply date range filter
         $this->applyDateRangeFilter($query, $request, 'planning_date');
@@ -39,7 +109,8 @@ class Dashboard3Controller extends ApiController
             'total_qty_delivered' => $totalQtyDelivered,
             'total_outstanding_qty' => $totalOutstandingQty,
             'completion_rate' => $completionRate,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -53,7 +124,9 @@ class Dashboard3Controller extends ApiController
      */
     public function productionStatusDistribution(Request $request): JsonResponse
     {
+        $divisiSelection = $this->resolveDivisionFilter($request);
         $query = ProdHeader::query();
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Apply date range filter
         $this->applyDateRangeFilter($query, $request, 'planning_date');
@@ -69,7 +142,8 @@ class Dashboard3Controller extends ApiController
         return response()->json([
             'data' => $data,
             'total_orders' => $totalOrders,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -85,7 +159,9 @@ class Dashboard3Controller extends ApiController
     public function productionByCustomer(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 15);
+        $divisiSelection = $this->resolveDivisionFilter($request);
         $query = ProdHeader::query();
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Apply date range filter
         $this->applyDateRangeFilter($query, $request, 'planning_date');
@@ -101,7 +177,8 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -117,7 +194,9 @@ class Dashboard3Controller extends ApiController
     public function productionByModel(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 20);
+        $divisiSelection = $this->resolveDivisionFilter($request);
         $query = ProdHeader::query();
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Apply date range filter
         $this->applyDateRangeFilter($query, $request, 'planning_date');
@@ -132,7 +211,8 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -153,7 +233,9 @@ class Dashboard3Controller extends ApiController
      */
     public function productionScheduleTimeline(Request $request): JsonResponse
     {
+        $divisiSelection = $this->resolveDivisionFilter($request);
         $query = ProdHeader::query();
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Default: Active orders (qty_os > 0) OR orders from last 30 days
         if (!$request->has('date_from') && !$request->has('date_to') && !$request->has('status')) {
@@ -171,9 +253,7 @@ class Dashboard3Controller extends ApiController
         if ($request->has('customer')) {
             $query->where('customer', $request->customer);
         }
-        if ($request->has('divisi')) {
-            $query->where('divisi', $request->divisi);
-        }
+        // Division filter handled globally
         if ($request->has('date_from')) {
             $query->where('planning_date', '>=', $request->date_from);
         }
@@ -199,7 +279,8 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -208,7 +289,9 @@ class Dashboard3Controller extends ApiController
      */
     public function productionOutstandingAnalysis(Request $request): JsonResponse
     {
+        $divisiSelection = $this->resolveDivisionFilter($request);
         $query = ProdHeader::query();
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Apply filters
         if ($request->has('status')) {
@@ -255,7 +338,8 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $data->values(),
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -269,7 +353,9 @@ class Dashboard3Controller extends ApiController
      */
     public function productionByDivision(Request $request): JsonResponse
     {
+        $divisiSelection = $this->resolveDivisionFilter($request);
         $query = ProdHeader::query();
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Apply date range filter
         $this->applyDateRangeFilter($query, $request, 'planning_date');
@@ -284,7 +370,8 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -296,45 +383,74 @@ class Dashboard3Controller extends ApiController
      * - group_by: Alias for period parameter
      * - customer: Filter by customer
      * - divisi: Filter by division
-     * - date_from: Start date filter (planning_date)
-     * - date_to: End date filter (planning_date)
+     * - date_from: Start date filter (for daily: month, for monthly: year, for yearly: date range)
+     * - date_to: End date filter
+     *
+     * Filtering Logic:
+     * - Daily: Compare dates within the selected month (date_from should be a date in the month)
+     * - Monthly: Compare months within the selected year (date_from should be a date in the year)
+     * - Yearly: Compare data across years (date_from and date_to define the year range)
      */
     public function productionTrend(Request $request): JsonResponse
     {
         $period = $request->get('period', $request->get('group_by', 'monthly'));
+        $divisiSelection = $this->resolveDivisionFilter($request);
 
         // Validate period
         if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
             $period = 'monthly';
         }
 
-        $query = ProdHeader::query();
+        $query = ProdReport::query();
 
-        // Apply filters
-        if ($request->has('customer')) {
-            $query->where('customer', $request->customer);
-        }
-        if ($request->has('divisi')) {
-            $query->where('divisi', $request->divisi);
+        // Apply divisi filter
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $query->whereIn('divisi', $divisiSelection['codes']);
         }
 
-        // Apply date range filter
-        $this->applyDateRangeFilter($query, $request, 'planning_date');
+        // Apply period-specific date filtering
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
 
-        // Get date format based on period
-        $dateFormat = $this->getDateFormatByPeriod($period, 'planning_date', $query);
+        if ($period === 'daily') {
+            // Daily: Filter by month from date_from (compare dates within selected month)
+            if ($dateFrom) {
+                $year = date('Y', strtotime($dateFrom));
+                $month = date('m', strtotime($dateFrom));
+                // Use SQL Server compatible date filtering
+                $query->whereRaw("YEAR(trans_date) = ?", [$year])
+                      ->whereRaw("MONTH(trans_date) = ?", [$month]);
+            }
+        } elseif ($period === 'monthly') {
+            // Monthly: Filter by year from date_from (compare months within selected year)
+            if ($dateFrom) {
+                $year = date('Y', strtotime($dateFrom));
+                $query->whereRaw("YEAR(trans_date) = ?", [$year]);
+            }
+        } elseif ($period === 'yearly') {
+            // Yearly: Filter by date range (compare data across years)
+            if ($dateFrom) {
+                $query->where('trans_date', '>=', $dateFrom);
+            }
+            if ($dateTo) {
+                $query->where('trans_date', '<=', $dateTo);
+            }
+        }
 
+        // Get date format based on period for grouping
+        $dateFormat = $this->getDateFormatByPeriod($period, 'trans_date', $query);
+
+        // Calculate qty_pelaporan based on prod_index (sum by prod_index)
         $data = $query->selectRaw("$dateFormat as period")
-            ->selectRaw('SUM(qty_order) as qty_ordered')
-            ->selectRaw('SUM(qty_delivery) as qty_delivered')
-            ->selectRaw('ROUND((SUM(qty_delivery) / NULLIF(SUM(qty_order), 0)) * 100, 2) as achievement_rate')
+            ->selectRaw('SUM(qty_pelaporan) as qty_pelaporan')
             ->groupByRaw($dateFormat)
             ->orderByRaw($dateFormat)
             ->get();
 
         return response()->json([
             'data' => $data,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'trans_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 
@@ -349,6 +465,7 @@ class Dashboard3Controller extends ApiController
     public function outstandingTrend(Request $request): JsonResponse
     {
         $period = $request->get('period', 'monthly');
+        $divisiSelection = $this->resolveDivisionFilter($request);
 
         // Validate period
         if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
@@ -356,6 +473,7 @@ class Dashboard3Controller extends ApiController
         }
 
         $query = ProdHeader::query()->where('qty_os', '>', 0);
+        $this->applyDivisiFilter($query, $divisiSelection['codes']);
 
         // Apply date range filter
         $this->applyDateRangeFilter($query, $request, 'planning_date');
@@ -375,7 +493,8 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
+            'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 

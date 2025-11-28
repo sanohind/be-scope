@@ -7,6 +7,7 @@ use App\Models\SoInvoiceLine2;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class Dashboard4Controller extends ApiController
 {
@@ -31,23 +32,23 @@ class Dashboard4Controller extends ApiController
     {
         $dateFrom = $request->get('date_from');
         $dateTo = $request->get('date_to');
-        
+
         // If both dates specified
         if ($dateFrom && $dateTo) {
             $yearFrom = (int) substr($dateFrom, 0, 4);
             $yearTo = (int) substr($dateTo, 0, 4);
-            
+
             // If both years >= 2025, use SoInvoiceLine
             if ($yearFrom >= 2025 && $yearTo >= 2025) {
                 return SoInvoiceLine::query();
             }
-            
+
             // If both years < 2025, use SoInvoiceLine2
             if ($yearFrom < 2025 && $yearTo < 2025) {
                 return SoInvoiceLine2::query();
             }
         }
-        
+
         // If only date_from specified
         if ($dateFrom && !$dateTo) {
             $yearFrom = (int) substr($dateFrom, 0, 4);
@@ -55,7 +56,7 @@ class Dashboard4Controller extends ApiController
                 return SoInvoiceLine::query();
             }
         }
-        
+
         // If only date_to specified
         if (!$dateFrom && $dateTo) {
             $yearTo = (int) substr($dateTo, 0, 4);
@@ -63,58 +64,125 @@ class Dashboard4Controller extends ApiController
                 return SoInvoiceLine2::query();
             }
         }
-        
+
         // Default to SoInvoiceLine2 for backward compatibility and mixed ranges
         return SoInvoiceLine2::query();
     }
+
+    /**
+     * Ensure the request contains a valid date range, defaulting to the current month
+     */
+    private function ensureDateRange(Request $request, ?Carbon $defaultStart = null, ?Carbon $defaultEnd = null): array
+    {
+        $defaultStart = $defaultStart ?? now()->startOfMonth();
+        $defaultEnd = $defaultEnd ?? now();
+
+        $start = $request->filled('date_from')
+            ? Carbon::parse($request->get('date_from'))
+            : $defaultStart;
+
+        $end = $request->filled('date_to')
+            ? Carbon::parse($request->get('date_to'))
+            : $defaultEnd;
+
+        if ($end->lt($start)) {
+            [$start, $end] = [$end, $start];
+        }
+
+        $request->merge([
+            'date_from' => $start->toDateString(),
+            'date_to' => $end->toDateString(),
+        ]);
+
+        return [
+            'from' => $start,
+            'to' => $end,
+        ];
+    }
+
+    /**
+     * Build a query for the given date range, falling back to the alternate source when no data exists.
+     */
+    private function buildRangeQueryWithFallback(string $preferredModel, Carbon $start, Carbon $end)
+    {
+        $query = $preferredModel::query()
+            ->whereBetween('invoice_date', [
+                $start->toDateString(),
+                $end->toDateString()
+            ]);
+
+        if (!(clone $query)->exists()) {
+            $alternateModel = $preferredModel === SoInvoiceLine::class
+                ? SoInvoiceLine2::class
+                : SoInvoiceLine::class;
+
+            $query = $alternateModel::query()
+                ->whereBetween('invoice_date', [
+                    $start->toDateString(),
+                    $end->toDateString()
+                ]);
+        }
+
+        return $query;
+    }
     /**
      * Chart 4.1: Sales Overview KPI - KPI Cards
-     * 
+     *
      * Query Parameters:
      * - year: Year to display (default: latest data year)
      * - month: Month to display (default: latest data month)
      */
     public function salesOverviewKpi(Request $request): JsonResponse
     {
-        // Get latest month with data if not specified
-        if (!$request->has('year') || !$request->has('month')) {
-            // Try SoInvoiceLine first (2025+ data)
-            $latestData = SoInvoiceLine::selectRaw('YEAR(invoice_date) as year, MONTH(invoice_date) as month')
-                ->whereNotNull('invoice_date')
-                ->whereRaw('invoice_date < GETDATE()') // Only past dates
-                ->groupByRaw('YEAR(invoice_date), MONTH(invoice_date)')
-                ->havingRaw('SUM(amount_hc) > 0') // Only months with positive total
-                ->orderByRaw('YEAR(invoice_date) DESC, MONTH(invoice_date) DESC')
-                ->first();
-            
-            $year = $latestData ? $latestData->year : now()->year;
-            $month = $latestData ? $latestData->month : now()->month;
-        } else {
-            $year = $request->get('year');
-            $month = $request->get('month');
+        $defaultStart = now()->startOfMonth();
+        $defaultEnd = now();
+
+        if ($request->has('year') || $request->has('month')) {
+            $targetYear = (int) $request->get('year', now()->year);
+            $targetMonth = (int) $request->get('month', now()->month);
+            $defaultStart = Carbon::create($targetYear, $targetMonth, 1)->startOfMonth();
+            $defaultEnd = $defaultStart->copy()->endOfMonth();
+
+            if ($defaultStart->isSameMonth(now())) {
+                $defaultEnd = now();
+            }
         }
 
-        // Use appropriate model based on year
+        $range = $this->ensureDateRange($request, $defaultStart, $defaultEnd);
+        $year = (int) $range['from']->year;
+        $month = (int) $range['from']->month;
+
         $model = $this->getModelByYear($year);
-        $currentMonthQuery = $model::query()
-            ->whereYear('invoice_date', $year)
-            ->whereMonth('invoice_date', $month);
+        $currentMonthQuery = $this->buildRangeQueryWithFallback(
+            $model,
+            $range['from'],
+            $range['to']
+        );
 
         $totalSalesAmount = (clone $currentMonthQuery)->sum('amount_hc');
         $totalShipments = (clone $currentMonthQuery)->distinct('shipment')->count('shipment');
         $totalInvoices = (clone $currentMonthQuery)->distinct('invoice_no')->count('invoice_no');
-        $outstandingInvoices = (clone $currentMonthQuery)
-            ->where('invoice_status', 'Outstanding')
-            ->distinct('invoice_no')
-            ->count('invoice_no');
 
-        // Previous month for comparison - may use different table
-        $prevDate = \Carbon\Carbon::create($year, $month, 1)->subMonth();
-        $prevModel = $this->getModelByYear($prevDate->year);
-        $previousSalesAmount = $prevModel::query()
-            ->whereYear('invoice_date', $prevDate->year)
-            ->whereMonth('invoice_date', $prevDate->month)
-            ->sum('amount_hc');
+        // Outstanding invoices berdasarkan delivery_date
+        $outstandingInvoicesQuery = $model::query()
+            ->whereBetween('delivery_date', [
+                $range['from']->toDateString(),
+                $range['to']->toDateString()
+            ])
+            ->where('shipment_status', ['Approved', 'Released']);
+        $outstandingInvoices = $outstandingInvoicesQuery
+            ->distinct('shipment')
+            ->count('shipment');
+
+        $prevStart = $range['from']->copy()->subMonth()->startOfMonth();
+        $prevEnd = $prevStart->copy()->endOfMonth();
+        $prevModel = $this->getModelByYear($prevStart->year);
+        $previousMonthQuery = $this->buildRangeQueryWithFallback(
+            $prevModel,
+            $prevStart,
+            $prevEnd
+        );
+        $previousSalesAmount = (clone $previousMonthQuery)->sum('amount_hc');
 
         $salesGrowth = $previousSalesAmount > 0
             ? round((($totalSalesAmount - $previousSalesAmount) / $previousSalesAmount) * 100, 2)
@@ -127,7 +195,11 @@ class Dashboard4Controller extends ApiController
             'outstanding_invoices' => $outstandingInvoices,
             'sales_growth' => $salesGrowth,
             'period' => sprintf('%04d-%02d', $year, $month),
-            'month' => \Carbon\Carbon::create($year, $month, 1)->format('F Y')
+            'month' => Carbon::create($year, $month, 1)->format('F Y'),
+            'date_range' => [
+                'from' => $range['from']->toDateString(),
+                'to' => $range['to']->toDateString(),
+            ],
         ]);
     }
 
@@ -192,6 +264,7 @@ class Dashboard4Controller extends ApiController
     public function topCustomersByRevenue(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 20);
+        $this->ensureDateRange($request);
         $query = $this->getQueryForDateRange($request);
 
         // Apply date range filter
@@ -229,31 +302,25 @@ class Dashboard4Controller extends ApiController
      * Chart 4.4: Sales by Product Type - Donut Chart
      * Shows revenue for the current month only
      */
-    public function salesByProductType(): JsonResponse
+    public function salesByProductType(Request $request): JsonResponse
     {
-        // Get current year and month
-        $now = now();
-        $currentYear = $now->year;
-        $currentMonth = $now->month;
-        
-        // Use appropriate model based on current year
-        $model = $this->getModelByYear($currentYear);
+        $range = $this->ensureDateRange($request);
+        $query = $this->getQueryForDateRange($request);
 
-        $actualMonth = $currentMonth - 1;
-        
-        $data = $model::select('product_type')
+        $data = $query->select('product_type')
             ->selectRaw('SUM(amount_hc) as revenue')
             ->selectRaw('SUM(delivered_qty) as qty_sold')
             ->selectRaw('COUNT(DISTINCT invoice_no) as invoice_count')
-            ->whereYear('invoice_date', $currentYear)
-            ->whereMonth('invoice_date', $actualMonth)
+            ->whereBetween('invoice_date', [
+                $range['from']->toDateString(),
+                $range['to']->toDateString()
+            ])
             ->groupBy('product_type')
             ->orderBy('revenue', 'desc')
             ->get();
 
         $totalRevenue = $data->sum('revenue');
 
-        // Calculate percentage for each product type
         $data = $data->map(function ($item) use ($totalRevenue) {
             $item->percentage = $totalRevenue > 0
                 ? round(($item->revenue / $totalRevenue) * 100, 2)
@@ -264,7 +331,10 @@ class Dashboard4Controller extends ApiController
         return response()->json([
             'data' => $data,
             'total_revenue' => $totalRevenue,
-            'period' => sprintf('%04d-%02d', $currentYear, $actualMonth)
+            'date_range' => [
+                'from' => $range['from']->toDateString(),
+                'to' => $range['to']->toDateString(),
+            ],
         ]);
     }
 
@@ -361,18 +431,18 @@ class Dashboard4Controller extends ApiController
     /**
      * Chart 4.6: Invoice Status Distribution - Stacked Bar Chart (100%)
      * Data Source: so_invoice_line
-     * 
+     *
      * Dimensions:
      * - X-axis: Time Period (monthly) or Customer
      * - Y-axis: Percentage
      * - Stack: Invoice Status (invoice_status)
-     * 
+     *
      * Status Categories:
      * - Paid (Green)
      * - Outstanding (Yellow)
      * - Overdue (Red)
      * - Cancelled (Gray)
-     * 
+     *
      * Query Parameters:
      * - period: Filter by period (daily, monthly, yearly) - default: monthly
      * - group_by: Can be 'customer' or period (daily/monthly/yearly)
@@ -429,7 +499,7 @@ class Dashboard4Controller extends ApiController
     public function salesOrderFulfillment(Request $request): JsonResponse
     {
         $period = $request->get('period', 'monthly');
-        
+
         // Validate period - only monthly and yearly allowed
         if (!in_array($period, ['monthly', 'yearly'])) {
             $period = 'monthly';
@@ -460,14 +530,14 @@ class Dashboard4Controller extends ApiController
         if ($fromDate->lt($splitDate)) {
             $query2 = SoInvoiceLine2::query();
             $applyFilters($query2, $request);
-            
+
             $erp2EndDate = $toDate->lt($splitDate) ? $toDate : $splitDate->copy()->subDay();
-            
+
             $isSqlServer2 = $query2->getConnection()->getDriverName() === 'sqlsrv';
-            $dateFormat2 = $period === 'yearly' 
+            $dateFormat2 = $period === 'yearly'
                 ? ($isSqlServer2 ? "CAST(YEAR(invoice_date) AS VARCHAR)" : "YEAR(invoice_date)")
                 : ($isSqlServer2 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)" : "DATE_FORMAT(invoice_date, '%Y-%m')");
-            
+
             $erp2Data = $query2
                 ->selectRaw("$dateFormat2 as period")
                 ->selectRaw('SUM(delivered_qty) as delivered_qty')
@@ -476,7 +546,7 @@ class Dashboard4Controller extends ApiController
                 ->groupByRaw($dateFormat2)
                 ->orderByRaw($dateFormat2)
                 ->get();
-            
+
             $allData = $allData->merge($erp2Data);
         }
 
@@ -484,14 +554,14 @@ class Dashboard4Controller extends ApiController
         if ($toDate->gte($splitDate)) {
             $query1 = SoInvoiceLine::query();
             $applyFilters($query1, $request);
-            
+
             $erp1StartDate = $fromDate->gte($splitDate) ? $fromDate : $splitDate;
-            
+
             $isSqlServer1 = $query1->getConnection()->getDriverName() === 'sqlsrv';
-            $dateFormat1 = $period === 'yearly' 
+            $dateFormat1 = $period === 'yearly'
                 ? ($isSqlServer1 ? "CAST(YEAR(invoice_date) AS VARCHAR)" : "YEAR(invoice_date)")
                 : ($isSqlServer1 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)" : "DATE_FORMAT(invoice_date, '%Y-%m')");
-            
+
             $erp1Data = $query1
                 ->selectRaw("$dateFormat1 as period")
                 ->selectRaw('SUM(delivered_qty) as delivered_qty')
@@ -500,7 +570,7 @@ class Dashboard4Controller extends ApiController
                 ->groupByRaw($dateFormat1)
                 ->orderByRaw($dateFormat1)
                 ->get();
-            
+
             $allData = $allData->merge($erp1Data);
         }
 
@@ -523,6 +593,7 @@ class Dashboard4Controller extends ApiController
     public function topSellingProducts(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 10);
+        $this->ensureDateRange($request);
 
         $query = $this->getQueryForDateRange($request);
 
@@ -533,12 +604,10 @@ class Dashboard4Controller extends ApiController
         if ($request->has('customer')) {
             $query->where('bp_name', $request->customer);
         }
-        if ($request->has('date_from')) {
-            $query->where('invoice_date', '>=', $request->date_from);
-        }
-        if ($request->has('date_to')) {
-            $query->where('invoice_date', '<=', $request->date_to);
-        }
+        $query->whereBetween('invoice_date', [
+            $request->get('date_from'),
+            $request->get('date_to'),
+        ]);
 
         $data = $query->select('part_no', 'old_partno', 'cust_partname')
             ->selectRaw('SUM(delivered_qty) as total_qty_sold')
@@ -569,12 +638,12 @@ class Dashboard4Controller extends ApiController
         $now = now();
         $currentYear = $now->year;
         $currentMonth = $now->month;
-        
+
         // Use appropriate model based on current year
         $model = $this->getModelByYear($currentYear);
 
         $actualMonth = $currentMonth - 1;
-        
+
         $data = $model::select('currency')
             ->selectRaw('SUM(amount) as amount_original')
             ->selectRaw('SUM(amount_hc) as amount_hc')
@@ -615,9 +684,14 @@ class Dashboard4Controller extends ApiController
      */
     public function monthlySalesComparison(Request $request): JsonResponse
     {
-        // Determine date range
-        $dateTo = $request->get('date_to', date('Y-m-t')); // End of current month
-        $dateFrom = $request->get('date_from', date('Y-m-01', strtotime('-11 months'))); // 12 months of data
+        $range = $this->ensureDateRange(
+            $request,
+            now()->startOfYear(),
+            now()
+        );
+
+        $dateFrom = $range['from']->toDateString();
+        $dateTo = $range['to']->toDateString();
 
         $allData = collect();
 
@@ -632,31 +706,32 @@ class Dashboard4Controller extends ApiController
         };
 
         // Parse dates to determine which data source to use
-        $fromDate = \Carbon\Carbon::parse($dateFrom);
-        $toDate = \Carbon\Carbon::parse($dateTo);
-        $splitDate = \Carbon\Carbon::parse('2025-08-01');
+        $fromDate = Carbon::parse($dateFrom);
+        $toDate = Carbon::parse($dateTo);
+        $splitDate = Carbon::parse('2025-08-01');
 
         // Query data from ERP2 (before Aug 2025)
         if ($fromDate->lt($splitDate)) {
             $query2 = SoInvoiceLine2::query();
             $applyFilters($query2, $request);
-            
+
             $erp2EndDate = $toDate->lt($splitDate) ? $toDate : $splitDate->copy()->subDay();
-            
+
             $isSqlServer2 = $query2->getConnection()->getDriverName() === 'sqlsrv';
-            $dateFormat2 = $isSqlServer2 
+            $dateFormat2 = $isSqlServer2
                 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)"
                 : "DATE_FORMAT(invoice_date, '%Y-%m')";
-            
+
             $erp2Data = $query2
                 ->selectRaw("$dateFormat2 as period")
                 ->selectRaw('SUM(amount_hc) as revenue')
+                ->where('invoice_status', 'Posted')
                 ->where('invoice_date', '>=', $fromDate->format('Y-m-d'))
                 ->where('invoice_date', '<=', $erp2EndDate->format('Y-m-d'))
                 ->groupByRaw($dateFormat2)
                 ->orderByRaw($dateFormat2)
                 ->get();
-            
+
             $allData = $allData->merge($erp2Data);
         }
 
@@ -664,14 +739,14 @@ class Dashboard4Controller extends ApiController
         if ($toDate->gte($splitDate)) {
             $query1 = SoInvoiceLine::query();
             $applyFilters($query1, $request);
-            
+
             $erp1StartDate = $fromDate->gte($splitDate) ? $fromDate : $splitDate;
-            
+
             $isSqlServer1 = $query1->getConnection()->getDriverName() === 'sqlsrv';
-            $dateFormat1 = $isSqlServer1 
+            $dateFormat1 = $isSqlServer1
                 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)"
                 : "DATE_FORMAT(invoice_date, '%Y-%m')";
-            
+
             $erp1Data = $query1
                 ->selectRaw("$dateFormat1 as period")
                 ->selectRaw('SUM(amount_hc) as revenue')
@@ -680,7 +755,7 @@ class Dashboard4Controller extends ApiController
                 ->groupByRaw($dateFormat1)
                 ->orderByRaw($dateFormat1)
                 ->get();
-            
+
             $allData = $allData->merge($erp1Data);
         }
 
@@ -693,7 +768,7 @@ class Dashboard4Controller extends ApiController
 
         foreach ($sortedData as $index => $item) {
             $currentRevenue = $item->revenue;
-            
+
             $momGrowth = null;
             if ($previousRevenue !== null && $previousRevenue > 0) {
                 $momGrowth = round((($currentRevenue - $previousRevenue) / $previousRevenue) * 100, 2);
@@ -725,7 +800,7 @@ class Dashboard4Controller extends ApiController
             'sales_overview_kpi' => $this->salesOverviewKpi($request)->getData(true),
             'revenue_trend' => $this->revenueTrend($request)->getData(true),
             'top_customers_by_revenue' => $this->topCustomersByRevenue($request)->getData(true),
-            'sales_by_product_type' => $this->salesByProductType()->getData(true),
+            'sales_by_product_type' => $this->salesByProductType($request)->getData(true),
             'shipment_status_tracking' => $this->shipmentStatusTracking()->getData(true),
             'delivery_performance' => $this->deliveryPerformance()->getData(true),
             'invoice_status_distribution' => $this->invoiceStatusDistribution($request)->getData(true),

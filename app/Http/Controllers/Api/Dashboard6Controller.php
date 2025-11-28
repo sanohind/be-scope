@@ -459,6 +459,183 @@ class Dashboard6Controller extends ApiController
     }
 
     /**
+     * Chart 6.9: Shipment Table - Table View
+     *
+     * Query Parameters:
+     * - page: Page number for pagination (default: 1)
+     * - per_page: Number of records per page (default: 10, max: 100)
+     * - sort_by: Column to sort by (shipment, customer_po, delivery_date, lead_time) - default: delivery_date
+     * - sort_order: Sort direction (asc, desc) - default: desc
+     * - search: Search term for shipment or customer_po
+     */
+    public function shipmentTable(Request $request): JsonResponse
+    {
+        $perPage = min($request->get('per_page', 10), 100);
+        $sortBy = $request->get('sort_by', 'delivery_date');
+        $sortOrder = $request->get('sort_order', 'desc');
+        $search = $request->get('search', '');
+
+        // Validate sort_by
+        $allowedSortColumns = ['shipment', 'customer_po', 'delivery_date', 'lead_time'];
+        if (!in_array($sortBy, $allowedSortColumns)) {
+            $sortBy = 'delivery_date';
+        }
+
+        // Validate sort_order
+        if (!in_array($sortOrder, ['asc', 'desc'])) {
+            $sortOrder = 'desc';
+        }
+
+        // Detect database driver to use appropriate SQL syntax
+        $query = SoInvoiceLine::query();
+        $connection = $query->getConnection();
+        $driver = $connection->getDriverName();
+        $isSqlServer = ($driver === 'sqlsrv');
+
+        // Build date difference calculation based on database type
+        if ($isSqlServer) {
+            $leadTimeExpression = "DATEDIFF(day, delivery_date, GETDATE())";
+        } else {
+            // MySQL: DATEDIFF returns date1 - date2, so we need to reverse the order
+            $leadTimeExpression = "DATEDIFF(NOW(), delivery_date)";
+        }
+
+        $query->select(
+                'shipment',
+                'shipment_status',
+                'customer_po',
+                'delivery_date',
+                'product_type',
+                'shipment_reference'
+            )
+            ->selectRaw("{$leadTimeExpression} as lead_time")
+            ->whereNotNull('shipment')
+            ->whereNotNull('delivery_date')
+            // only include shipments with shipment_status = 'Approved' (case-insensitive)
+            ->whereRaw("UPPER(LTRIM(RTRIM(shipment_status))) = UPPER(?)", ['Approved']);
+
+        // Group by to get distinct shipments
+        $query->groupBy('shipment', 'shipment_status', 'customer_po', 'delivery_date', 'product_type', 'shipment_reference');
+
+        // Apply search filter
+        if (!empty($search)) {
+            $query->where(function($q) use ($search) {
+                $q->where('shipment', 'LIKE', "%{$search}%")
+                ->orWhere('customer_po', 'LIKE', "%{$search}%");
+            });
+        }
+
+        // Apply sorting
+        if ($sortBy === 'lead_time') {
+            $query->orderByRaw("{$leadTimeExpression} {$sortOrder}");
+        } else {
+            $query->orderBy($sortBy, $sortOrder);
+        }
+
+        // Get paginated results
+        $shipments = $query->paginate($perPage);
+
+        return response()->json([
+            'data' => $shipments->items(),
+            'pagination' => [
+                'current_page' => $shipments->currentPage(),
+                'per_page' => $shipments->perPage(),
+                'total' => $shipments->total(),
+                'last_page' => $shipments->lastPage(),
+                'from' => $shipments->firstItem(),
+                'to' => $shipments->lastItem()
+            ],
+            'filters' => [
+                'search' => $search,
+                'sort_by' => $sortBy,
+                'sort_order' => $sortOrder,
+                'shipment_status' => 'Approved'
+            ]
+        ]);
+    }
+
+    /**
+     * Chart 6.10: Shipment Status Comparison - Bar Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly) - default: monthly
+     * - date_from: Start date filter
+     * - date_to: End date filter
+     *
+     * Returns:
+     * - period: The period label (date for daily, month for monthly)
+     * - total_shipment: Total count of distinct shipments
+     * - approved_count: Count of shipments with status 'Approved'
+     * - released_count: Count of shipments with status 'Released'
+     * - invoiced_count: Count of shipments with status 'Invoiced'
+     */
+    public function shipmentStatusComparison(Request $request): JsonResponse
+    {
+        $period = $request->get('period', 'monthly');
+
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly'])) {
+            $period = 'monthly';
+        }
+
+        $query = SoInvoiceLine::query();
+
+        // Apply date range filter using delivery_date
+        $this->applyDateRangeFilter($query, $request, 'delivery_date');
+
+        // Get date format based on period
+        $dateFormat = $this->getDateFormatByPeriod($period, 'delivery_date', $query);
+
+        // Detect database driver for case-insensitive comparison
+        $connection = $query->getConnection();
+        $driver = $connection->getDriverName();
+        $isSqlServer = ($driver === 'sqlsrv');
+
+        // Build case-insensitive status comparison
+        if ($isSqlServer) {
+            $approvedCondition = "UPPER(LTRIM(RTRIM(shipment_status))) = 'APPROVED'";
+            $releasedCondition = "UPPER(LTRIM(RTRIM(shipment_status))) = 'RELEASED'";
+            $invoicedCondition = "UPPER(LTRIM(RTRIM(shipment_status))) = 'INVOICED'";
+            $processedCondition = "UPPER(LTRIM(RTRIM(shipment_status))) = 'PROCESSED'";
+        } else {
+            $approvedCondition = "UPPER(TRIM(shipment_status)) = 'APPROVED'";
+            $releasedCondition = "UPPER(TRIM(shipment_status)) = 'RELEASED'";
+            $invoicedCondition = "UPPER(TRIM(shipment_status)) = 'INVOICED'";
+            $processedCondition = "UPPER(TRIM(shipment_status)) = 'PROCESSED'";
+        }
+
+        // Query to get grouped data by period
+        // Count distinct shipments per status
+        $data = $query->selectRaw("$dateFormat as period")
+            ->selectRaw('COUNT(DISTINCT shipment) as total_shipment')
+            ->selectRaw("COUNT(DISTINCT CASE WHEN $approvedCondition THEN shipment END) as approved_count")
+            ->selectRaw("COUNT(DISTINCT CASE WHEN $releasedCondition THEN shipment END) as released_count")
+            ->selectRaw("COUNT(DISTINCT CASE WHEN $invoicedCondition THEN shipment END) as invoiced_count")
+            ->selectRaw("COUNT(DISTINCT CASE WHEN $processedCondition THEN shipment END) as processed_count")
+            ->whereNotNull('shipment')
+            ->whereNotNull('delivery_date')
+            ->groupByRaw($dateFormat)
+            ->orderByRaw($dateFormat)
+            ->get()
+            ->map(function ($item) {
+                return [
+                    'period' => $item->period,
+                    'total_shipment' => (int) $item->total_shipment,
+                    'approved_count' => (int) $item->approved_count,
+                    'released_count' => (int) $item->released_count,
+                    'invoiced_count' => (int) $item->invoiced_count,
+                    'processed_count' => (int) $item->processed_count
+                ];
+            });
+
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'delivery_date')
+        ]);
+    }
+
+
+    /**
      * Get all dashboard 6 data in one call
      */
     public function getAllData(Request $request): JsonResponse
@@ -471,7 +648,8 @@ class Dashboard6Controller extends ApiController
             'lead_time_analysis' => $this->leadTimeAnalysis($request)->getData(true),
             'material_availability_for_production' => $this->materialAvailabilityForProduction($request)->getData(true),
             'backorder_analysis' => $this->backorderAnalysis()->getData(true),
-            'supply_chain_cycle_time_trend' => $this->supplyChainCycleTimeTrend($request)->getData(true)
+            'supply_chain_cycle_time_trend' => $this->supplyChainCycleTimeTrend($request)->getData(true),
+            'shipment_table' => $this->shipmentTable($request)->getData(true)
         ]);
     }
 

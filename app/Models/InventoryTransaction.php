@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class InventoryTransaction extends Model
 {
-    protected $connection = 'mysql';
+    protected $connection = 'erp';
     protected $table = 'inventory_transaction';
     public $timestamps = false;
 

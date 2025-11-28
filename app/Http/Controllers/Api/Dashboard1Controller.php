@@ -10,11 +10,44 @@ use Illuminate\Support\Facades\DB;
 class Dashboard1Controller extends ApiController
 {
     /**
+     * Default warehouse list when no filter supplied.
+     */
+    private array $defaultWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+
+    /**
+     * Resolve warehouse codes based on request input.
+     */
+    private function resolveWarehouses(?Request $request = null): array
+    {
+        $request = $request ?? request();
+        $warehouseParam = $request->input('warehouse');
+
+        $aliases = [
+            'RM' => ['WHRM01', 'WHRM02', 'WHMT01'],
+            'FG' => ['WHFG01', 'WHFG02'],
+        ];
+
+        if (!$warehouseParam) {
+            return $this->defaultWarehouses;
+        }
+
+        if (isset($aliases[$warehouseParam])) {
+            return $aliases[$warehouseParam];
+        }
+
+        if (in_array($warehouseParam, $this->defaultWarehouses, true)) {
+            return [$warehouseParam];
+        }
+
+        abort(400, 'Invalid warehouse parameter');
+    }
+
+    /**
      * Chart 1.1: Stock Level Overview - KPI Cards
      */
     public function stockLevelOverview(): JsonResponse
     {
-        $warehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+        $warehouses = $this->resolveWarehouses();
 
         // Use DB::connection to ensure we're using the ERP database
         $totalItems = DB::connection('erp')->table('stockbywh')
@@ -64,8 +97,8 @@ class Dashboard1Controller extends ApiController
     {
         $query = StockByWh::query();
 
-        // Filter only specific warehouses
-        $query->whereIn('warehouse', ['WHRM01', 'WHRM02', 'WHFG01', 'WHFG02', 'WHMT01']);
+        // Filter allowed warehouses (supports RM/FG aliases)
+        $query->whereIn('warehouse', $this->resolveWarehouses($request));
 
         // Apply filters
         if ($request->has('product_type')) {
@@ -123,7 +156,7 @@ class Dashboard1Controller extends ApiController
                 'max_stock',
                 'location'
             ])
-            ->whereIn('warehouse', ['WHRM01', 'WHRM02', 'WHFG01', 'WHFG02', 'WHMT01'])
+            ->whereIn('warehouse', $this->resolveWarehouses($request))
             ->selectRaw('(safety_stock - onhand) as gap')
             ->orderByRaw('(safety_stock - onhand) DESC')
             ->limit(20)
@@ -146,7 +179,7 @@ class Dashboard1Controller extends ApiController
                 'allocated'
             ])
             ->selectRaw('(onhand - allocated) as available')
-            ->whereIn('warehouse', ['WHRM01', 'WHRM02', 'WHFG01', 'WHFG02', 'WHMT01'])
+            ->whereIn('warehouse', $this->resolveWarehouses())
             ->orderBy('onhand', 'desc')
             ->get()
             ->groupBy(['product_type', 'model']);
@@ -159,13 +192,14 @@ class Dashboard1Controller extends ApiController
      */
     public function stockByCustomer(): JsonResponse
     {
-        $query = StockByWh::query();
-        
-        $data = StockByWh::select('customer')
+        $warehouses = $this->resolveWarehouses();
+
+        $data = DB::connection('erp')->table('stockbywh')
+            ->select('group_type_desc')
             ->selectRaw('SUM(onhand) as total_onhand')
             ->selectRaw('COUNT(DISTINCT partno) as total_items')
-            ->whereIn('warehouse', ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'])
-            ->groupBy('customer')
+            ->whereIn('warehouse', $warehouses)
+            ->groupBy('group_type_desc')
             ->orderBy('total_onhand', 'desc')
             ->get();
 
@@ -174,8 +208,12 @@ class Dashboard1Controller extends ApiController
 
         return response()->json([
             'data' => $data,
-            'total_onhand' => $totalOnhand,
-            'total_items' => $totalItems
+            'summary' => [
+                'total_onhand' => $totalOnhand,
+                'total_items' => $totalItems,
+                'total_group_types' => $data->count()
+            ],
+            'warehouses' => $warehouses
         ]);
     }
 
@@ -184,17 +222,15 @@ class Dashboard1Controller extends ApiController
      */
     public function inventoryAvailabilityVsDemand(Request $request): JsonResponse
     {
-        $groupBy = $request->get('group_by', 'warehouse'); 
-
-        $query = StockByWh::query();
-
-        // Filter hanya warehouse tertentu
-        if ($groupBy === 'warehouse') {
-            $query->whereIn('warehouse', ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02']);
-            $query->groupBy('warehouse');
-        } else {
-            $query->groupBy('group');
+        $warehouses = $this->resolveWarehouses($request);
+        $groupBy = $request->get('group_by', 'warehouse');
+        if (!in_array($groupBy, ['warehouse', 'group'], true)) {
+            $groupBy = 'warehouse';
         }
+
+        $query = StockByWh::query()->whereIn('warehouse', $warehouses);
+
+        $query->groupBy($groupBy);
 
         $data = $query->select($groupBy)
             ->selectRaw('SUM(onhand) as total_onhand')
@@ -214,18 +250,10 @@ class Dashboard1Controller extends ApiController
     {
         // This would typically require a separate table with historical snapshots
         // For now, returning current data structure
-        $warehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
-        
-        $query = StockByWh::query();
-        
-        // Filter by specified warehouses
-        $query->whereIn('warehouse', $warehouses);
+        $warehouses = $this->resolveWarehouses($request);
 
-        // Allow specific warehouse override if provided in request
-        if ($request->has('warehouse')) {
-            $query->where('warehouse', $request->warehouse);
-        }
-        
+        $query = StockByWh::query()->whereIn('warehouse', $warehouses);
+
         if ($request->has('product_type')) {
             $query->where('product_type', $request->product_type);
         }
@@ -249,11 +277,86 @@ class Dashboard1Controller extends ApiController
     }
 
     /**
+     * Table: Stock Level Detail (All Warehouses)
+     */
+    public function stockLevelTable(Request $request): JsonResponse
+    {
+        $statusFilter = $request->input('status');
+        $search = $request->input('search');
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = min(200, max(10, (int) $request->input('per_page', 50)));
+        $offset = ($page - 1) * $perPage;
+
+        $warehouses = $this->resolveWarehouses($request);
+
+        $statusCase = "
+            CASE
+                WHEN s.onhand < s.min_stock THEN 'Critical'
+                WHEN s.onhand < s.safety_stock THEN 'Low'
+                WHEN s.onhand > s.max_stock THEN 'Overstock'
+                ELSE 'Normal'
+            END
+        ";
+
+        $baseQuery = DB::connection('erp')
+            ->table('stockbywh as s')
+            ->whereIn('s.warehouse', $warehouses);
+
+        if ($search) {
+            $baseQuery->where(function ($q) use ($search) {
+                $q->where('s.partno', 'LIKE', "%{$search}%")
+                    ->orWhere('s.partname', 'LIKE', "%{$search}%")
+                    ->orWhereRaw('s.[desc] LIKE ?', ["%{$search}%"]);
+            });
+        }
+
+        if ($statusFilter) {
+            $baseQuery->whereRaw("$statusCase = ?", [$statusFilter]);
+        }
+
+        $total = (clone $baseQuery)->count();
+
+        $data = (clone $baseQuery)
+            ->selectRaw("
+                s.partno,
+                COALESCE(NULLIF(s.partname, ''), s.[desc]) as part_name,
+                s.unit,
+                s.warehouse,
+                CAST(s.onhand AS DECIMAL(18,2)) as onhand,
+                CAST(s.min_stock AS DECIMAL(18,2)) as min_stock,
+                CAST(s.safety_stock AS DECIMAL(18,2)) as safety_stock,
+                CAST(s.max_stock AS DECIMAL(18,2)) as max_stock,
+                ($statusCase) as status
+            ")
+            ->orderByRaw("(s.safety_stock - s.onhand) DESC")
+            ->offset($offset)
+            ->limit($perPage)
+            ->get();
+
+        return response()->json([
+            'data' => $data,
+            'filters' => [
+                'status' => $statusFilter,
+                'search' => $search,
+                'warehouses' => $warehouses
+            ],
+            'pagination' => [
+                'total' => $total,
+                'per_page' => $perPage,
+                'current_page' => $page,
+                'last_page' => $perPage > 0 ? (int) ceil($total / $perPage) : 1,
+                'from' => $total > 0 ? $offset + 1 : 0,
+                'to' => min($offset + $perPage, $total)
+            ]
+        ]);
+    }
+
+    /**
      * Debug endpoint to check query and data
      */
     public function debugStockCount(): JsonResponse
     {
-        $warehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+        $warehouses = $this->resolveWarehouses();
 
         // Method 1: Using distinct()->count() with ERP connection
         $method1 = DB::connection('erp')->table('stockbywh')

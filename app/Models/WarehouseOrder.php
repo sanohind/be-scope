@@ -22,5 +22,6 @@ class WarehouseOrder extends Model
         'ship_to_type',
         'ship_to',
         'ship_to_desc',
+        'status_desc',
     ];
 }

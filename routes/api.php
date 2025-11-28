@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\DailyStockController;
 use App\Http\Controllers\Api\SyncController;
 use App\Http\Controllers\Api\StockByWhController;
 use App\Http\Controllers\Api\WarehouseOrderController;
@@ -20,6 +21,8 @@ use App\Http\Controllers\Api\Dashboard6Controller;
 use App\Http\Controllers\Api\Dashboard7Controller;
 use App\Http\Controllers\Api\Dashboard8Controller;
 use App\Http\Controllers\Api\Dashboard1RevisionController;
+use App\Http\Controllers\Api\Dashboard2RevisionController;
+use App\Http\Controllers\Api\HrDashboardController;
 
 /*
 |--------------------------------------------------------------------------
@@ -35,6 +38,8 @@ use App\Http\Controllers\Api\Dashboard1RevisionController;
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
+
+Route::get('/stock/daily', [DailyStockController::class, 'index']);
 
 // Public API Routes (add auth middleware if needed)
 Route::apiResources([
@@ -77,6 +82,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/stock-by-customer', [Dashboard1Controller::class, 'stockByCustomer']);
         Route::get('/inventory-availability-vs-demand', [Dashboard1Controller::class, 'inventoryAvailabilityVsDemand']);
         Route::get('/stock-movement-trend', [Dashboard1Controller::class, 'stockMovementTrend']);
+        Route::get('/stock-level', [Dashboard1Controller::class, 'stockLevelTable']);
         Route::get('/debug-stock-count', [Dashboard1Controller::class, 'debugStockCount']);
         Route::get('/all-data', [Dashboard1Controller::class, 'getAllData']);
     });
@@ -89,12 +95,13 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/top-critical-items', [Dashboard1RevisionController::class, 'topCriticalItems']);
         Route::get('/most-active-items', [Dashboard1RevisionController::class, 'mostActiveItems']);
         Route::get('/stock-and-activity-by-product-type', [Dashboard1RevisionController::class, 'stockActivityByProductType']);
-        Route::get('/stock-by-customer', [Dashboard1RevisionController::class, 'stockByCustomer']);
+        Route::get('/stock-by-group', [Dashboard1RevisionController::class, 'stockByGroupType']);
         Route::get('/receipt-vs-shipment-trend', [Dashboard1RevisionController::class, 'receiptVsShipmentTrend']);
         Route::get('/transaction-type-distribution', [Dashboard1RevisionController::class, 'transactionTypeDistribution']);
         Route::get('/fast-vs-slow-moving', [Dashboard1RevisionController::class, 'fastVsSlowMoving']);
         Route::get('/stock-turnover-rate', [Dashboard1RevisionController::class, 'stockTurnoverRate']);
         Route::get('/recent-transaction-history', [Dashboard1RevisionController::class, 'recentTransactionHistory']);
+        Route::get('/stock-level', [Dashboard1RevisionController::class, 'stockLevelTable']);
         Route::get('/all-data', [Dashboard1RevisionController::class, 'getAllData']);
     });
 
@@ -111,6 +118,20 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/order-timeline/filters', [Dashboard2Controller::class, 'warehouseOrderTimelineFilters']);
         Route::get('/order-timeline/{orderNo}', [Dashboard2Controller::class, 'warehouseOrderTimelineDetail']);
         Route::get('/all-data', [Dashboard2Controller::class, 'getAllData']);
+    });
+
+    // Dashboard 2 Revision: Warehouse Operations (Warehouse-Specific)
+    Route::prefix('warehouse-rev')->group(function () {
+        Route::get('/order-summary', [Dashboard2RevisionController::class, 'warehouseOrderSummary']);
+        Route::get('/delivery-performance', [Dashboard2RevisionController::class, 'deliveryPerformance']);
+        Route::get('/order-status-distribution', [Dashboard2RevisionController::class, 'orderStatusDistribution']);
+        Route::get('/daily-order-volume', [Dashboard2RevisionController::class, 'dailyOrderVolume']);
+        Route::get('/order-fulfillment-by-transaction-type', [Dashboard2RevisionController::class, 'orderFulfillmentByTransactionType']);
+        Route::get('/top-items-moved', [Dashboard2RevisionController::class, 'topItemsMoved']);
+        Route::get('/monthly-inbound-vs-outbound', [Dashboard2RevisionController::class, 'monthlyInboundVsOutbound']);
+        Route::get('/top-destinations', [Dashboard2RevisionController::class, 'topDestinations']);
+        Route::get('/stock-level', [Dashboard1RevisionController::class, 'stockLevelTable']);
+        Route::get('/all-data', [Dashboard2RevisionController::class, 'getAllData']);
     });
 
     // Dashboard 3: Production Planning & Monitoring
@@ -169,6 +190,9 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/material-availability-for-production', [Dashboard6Controller::class, 'materialAvailabilityForProduction']);
         Route::get('/backorder-analysis', [Dashboard6Controller::class, 'backorderAnalysis']);
         Route::get('/supply-chain-cycle-time-trend', [Dashboard6Controller::class, 'supplyChainCycleTimeTrend']);
+        Route::get('/shipment-table', [Dashboard6Controller::class, 'shipmentTable']);
+        Route::get('/shipment-summary', [Dashboard6Controller::class, 'shipmentSummary']);
+        Route::get('/shipment-status-comparison', [Dashboard6Controller::class, 'shipmentStatusComparison']);
         Route::get('/all-data', [Dashboard6Controller::class, 'getAllData']);
     });
 
@@ -200,5 +224,16 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/department-performance-comparison', [Dashboard8Controller::class, 'departmentPerformanceComparison']);
         Route::get('/monthly-business-overview', [Dashboard8Controller::class, 'monthlyBusinessOverview']);
         Route::get('/all-data', [Dashboard8Controller::class, 'getAllData']);
+    });
+
+    // Dashboard HR: Human Resources
+    Route::prefix('hr')->group(function () {
+        Route::post('/login', [HrDashboardController::class, 'login']);
+        Route::post('/refresh', [HrDashboardController::class, 'refreshToken']);
+        Route::get('/active-employees-count', [HrDashboardController::class, 'activeEmployeesCount']);
+        Route::get('/employment-status-comparison', [HrDashboardController::class, 'employmentStatusComparison']);
+        Route::get('/gender-distribution', [HrDashboardController::class, 'genderDistribution']);
+        Route::get('/present-attendance-by-shift', [HrDashboardController::class, 'presentAttendanceByShift']);
+        Route::get('/debug', [HrDashboardController::class, 'debug']);
     });
 });

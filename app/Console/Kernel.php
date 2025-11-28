@@ -25,6 +25,44 @@ class Kernel extends ConsoleKernel
         //          ->withoutOverlapping()
         //          ->runInBackground()
         //          ->appendOutputTo(storage_path('logs/sync.log'));
+
+        // Refresh HR API token daily at 00:00
+        $schedule->command('hr:refresh-token')
+                 ->daily()
+                 ->withoutOverlapping()
+                 ->appendOutputTo(storage_path('logs/hr-api.log'));
+
+        // Check and ensure HR API token exists every 6 hours
+        // This will auto-login if token doesn't exist or is expired
+        $schedule->command('hr:ensure-token')
+                 ->everySixHours()
+                 ->withoutOverlapping()
+                 ->appendOutputTo(storage_path('logs/hr-api.log'));
+
+        // Daily stock calculation
+        // $env = $this->app->environment();
+        
+        $schedule->command('daily-stock:calculate-five-minute')
+                     ->everyFiveMinutes()
+                     ->withoutOverlapping()
+                     ->appendOutputTo(storage_path('logs/daily-stock.log'))
+                     ->name('daily-stock-five-minute');
+
+        // if ($env === 'production') {
+        //     // Production: daily at 06:00 with daily granularity (default)
+        //     $schedule->command('daily-stock:calculate')
+        //              ->dailyAt('06:00')
+        //              ->withoutOverlapping()
+        //              ->appendOutputTo(storage_path('logs/daily-stock.log'))
+        //              ->name('daily-stock-production');
+        // } else {
+        //     // Testing: every 5 minutes with five-minute granularity (non-production)
+        //     $schedule->command('daily-stock:calculate-five-minute')
+        //              ->everyFiveMinutes()
+        //              ->withoutOverlapping()
+        //              ->appendOutputTo(storage_path('logs/daily-stock.log'))
+        //              ->name('daily-stock-five-minute');
+        // }
     }
 
     /**

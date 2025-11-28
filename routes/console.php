@@ -22,3 +22,23 @@ Schedule::command('sync:erp-data')
     ->withoutOverlapping()
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/sync.log'));
+
+// Refresh HR API token daily at 00:00
+Schedule::command('hr:refresh-token')
+    ->daily()
+    ->withoutOverlapping()
+    ->appendOutputTo(storage_path('logs/hr-api.log'));
+
+// Check and ensure HR API token exists every 6 hours
+// This will auto-login if token doesn't exist or is expired
+Schedule::command('hr:ensure-token')
+    ->everySixHours()
+    ->withoutOverlapping()
+    ->appendOutputTo(storage_path('logs/hr-api.log'));
+
+// Daily stock calculation with five-minute granularity
+Schedule::command('daily-stock:calculate-five-minute')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->appendOutputTo(storage_path('logs/daily-stock.log'))
+    ->name('daily-stock-five-minute');
