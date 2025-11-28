@@ -25,6 +25,8 @@ class DailyStockController extends Controller
                 'string',
                 Rule::in(array_merge($this->allWarehouses, array_keys($this->warehouseCategories))),
             ],
+            'period_start' => 'nullable|date_format:Y-m-d',
+            'period_end' => 'nullable|date_format:Y-m-d',
         ]);
 
         // Determine which warehouses to query
@@ -32,7 +34,7 @@ class DailyStockController extends Controller
 
         if (!empty($validated['warehouse'])) {
             $warehouse = $validated['warehouse'];
-            
+
             // If it's a category (RM or FG), get warehouses in that category
             if (in_array($warehouse, array_keys($this->warehouseCategories))) {
                 $warehousesToQuery = $this->warehouseCategories[$warehouse];
@@ -43,8 +45,19 @@ class DailyStockController extends Controller
         }
 
         // Get latest data for each period_start and warehouse combination
-        $records = WarehouseStockSummary::query()
-            ->whereIn('warehouse', $warehousesToQuery)
+        $query = WarehouseStockSummary::query()
+            ->whereIn('warehouse', $warehousesToQuery);
+
+        // Apply period filters if provided
+        if (!empty($validated['period_start'])) {
+            $query->where('period_start', '>=', $validated['period_start'] . ' 00:00:00');
+        }
+
+        if (!empty($validated['period_end'])) {
+            $query->where('period_end', '<=', $validated['period_end'] . ' 23:59:59');
+        }
+
+        $records = $query
             ->orderBy('warehouse')
             ->orderBy('period_start', 'desc')
             ->get()
@@ -73,13 +86,23 @@ class DailyStockController extends Controller
                 ];
             });
 
+        $warehouses = $records
+            ->groupBy('warehouse')
+            ->map(function ($items) {
+                return [
+                    'data' => $items->values()->all(),
+                ];
+            });
+
         return response()->json([
             'meta' => [
                 'warehouse_filter' => $validated['warehouse'] ?? 'all',
                 'warehouses_queried' => $warehousesToQuery,
+                'period_start_filter' => $validated['period_start'] ?? null,
+                'period_end_filter' => $validated['period_end'] ?? null,
                 'total_records' => $records->count(),
             ],
-            'data' => $records,
+            'warehouses' => $warehouses,
         ]);
     }
 }
