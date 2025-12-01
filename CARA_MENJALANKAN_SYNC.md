@@ -15,6 +15,16 @@ php artisan sync:erp-data
 
 # Manual sync untuk bulan tertentu
 php artisan sync:erp-data --manual --month=2025-08
+
+# Sync HR API Greatday
+# Inisialisasi (sync semua data)
+php artisan sync:hr-data --init
+
+# Manual sync untuk bulan tertentu
+php artisan sync:hr-data --manual --month=2025-11
+
+# Scheduled sync (otomatis setiap jam)
+php artisan sync:hr-data
 ```
 
 **Ini BUKAN error!** Artinya scheduler sudah berjalan dengan benar, tetapi command belum waktunya dieksekusi.

@@ -23,6 +23,20 @@ Schedule::command('sync:erp-data')
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/sync.log'));
 
+// Run HR sync every hour (for production)
+Schedule::command('sync:hr-data')
+    ->hourly()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/sync.log'));
+
+//Alternative: Run every 5 minutes for testing (uncomment to test)
+// Schedule::command('sync:hr-data')
+//     ->everyFiveMinutes()
+//     ->withoutOverlapping()
+//     ->runInBackground()
+//     ->appendOutputTo(storage_path('logs/sync.log'));
+
 // Refresh HR API token daily at 00:00
 Schedule::command('hr:refresh-token')
     ->daily()

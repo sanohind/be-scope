@@ -26,6 +26,20 @@ class Kernel extends ConsoleKernel
         //          ->runInBackground()
         //          ->appendOutputTo(storage_path('logs/sync.log'));
 
+        // Run HR sync every hour (for production)
+        $schedule->command('sync:hr-data')
+                 ->hourly()
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->appendOutputTo(storage_path('logs/sync.log'));
+
+        //Alternative: Run every 5 minutes for testing (uncomment to test)
+        // $schedule->command('sync:hr-data')
+        //          ->everyFiveMinutes()
+        //          ->withoutOverlapping()
+        //          ->runInBackground()
+        //          ->appendOutputTo(storage_path('logs/sync.log'));
+
         // Refresh HR API token daily at 00:00
         $schedule->command('hr:refresh-token')
                  ->daily()
@@ -41,12 +55,12 @@ class Kernel extends ConsoleKernel
 
         // Daily stock calculation
         // $env = $this->app->environment();
-        
-        $schedule->command('daily-stock:calculate-five-minute')
-                     ->everyFiveMinutes()
+
+        $schedule->command('daily-stock:calculate')
+                     ->dailyAt('06:00')
                      ->withoutOverlapping()
                      ->appendOutputTo(storage_path('logs/daily-stock.log'))
-                     ->name('daily-stock-five-minute');
+                     ->name('daily-stock-production');
 
         // if ($env === 'production') {
         //     // Production: daily at 06:00 with daily granularity (default)

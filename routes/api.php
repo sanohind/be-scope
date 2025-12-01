@@ -234,6 +234,8 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/employment-status-comparison', [HrDashboardController::class, 'employmentStatusComparison']);
         Route::get('/gender-distribution', [HrDashboardController::class, 'genderDistribution']);
         Route::get('/present-attendance-by-shift', [HrDashboardController::class, 'presentAttendanceByShift']);
+        Route::get('/top-employees-overtime', [HrDashboardController::class, 'topEmployeesOvertime']);
+        Route::get('/top-departments-overtime', [HrDashboardController::class, 'topDepartmentsOvertime']);
         Route::get('/debug', [HrDashboardController::class, 'debug']);
     });
 });

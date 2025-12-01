@@ -3,10 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\HrApiToken;
+use App\Models\AttendanceByPeriod;
+use App\Models\EmployeeMaster;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class HrDashboardController extends ApiController
 {
@@ -870,6 +874,208 @@ class HrDashboardController extends ApiController
         } catch (\Exception $e) {
             Log::error('HR API Present Attendance By Shift Error: ' . $e->getMessage());
             return $this->sendError('Failed to get present attendance by shift: ' . $e->getMessage(), [], 500);
+        }
+    }
+
+    /**
+     * Top 15 Employees by Overtime Index
+     * GET /api/dashboard/hr/top-employees-overtime
+     *
+     * Query Parameters:
+     * - month: Month (1-12, default: current month)
+     * - year: Year (default: current year)
+     */
+    public function topEmployeesOvertime(Request $request): JsonResponse
+    {
+        try {
+            // Get filter parameters
+            $month = $request->get('month', now()->month);
+            $year = $request->get('year', now()->year);
+
+            // Validate month
+            if ($month < 1 || $month > 12) {
+                $month = now()->month;
+            }
+
+            // Validate year
+            if ($year < 2000 || $year > 2100) {
+                $year = now()->year;
+            }
+
+            // Build date range for the selected month
+            $startDate = Carbon::create($year, $month, 1)->startOfMonth();
+            $endDate = $startDate->copy()->endOfMonth();
+
+            // If current month, don't go beyond today
+            if ($startDate->isSameMonth(now())) {
+                $endDate = now();
+            }
+
+            // Query: Get top 15 employees by total overtime index
+            // Use COALESCE to handle NULL values and sum only non-null values
+            $topEmployees = AttendanceByPeriod::query()
+                ->select(
+                    'attendance_by_period.emp_id',
+                    'employee_master.full_name',
+                    'employee_master.emp_no',
+                    'employee_master.costcenter_name',
+                    'employee_master.dept_name_en',
+                    DB::raw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) as total_overtime_index')
+                )
+                ->join('employee_master', 'attendance_by_period.emp_id', '=', 'employee_master.emp_id')
+                ->where(function($query) {
+                    $query->whereNotNull('attendance_by_period.total_otindex')
+                          ->orWhere('attendance_by_period.total_otindex', '!=', 0);
+                })
+                ->where(function($query) use ($startDate, $endDate) {
+                    $query->whereBetween('attendance_by_period.starttime', [
+                        $startDate->format('Y-m-d 00:00:00'),
+                        $endDate->format('Y-m-d 23:59:59')
+                    ])
+                    ->orWhereBetween('attendance_by_period.shiftstarttime', [
+                        $startDate->format('Y-m-d 00:00:00'),
+                        $endDate->format('Y-m-d 23:59:59')
+                    ]);
+                })
+                ->groupBy(
+                    'attendance_by_period.emp_id',
+                    'employee_master.full_name',
+                    'employee_master.emp_no',
+                    'employee_master.costcenter_name',
+                    'employee_master.dept_name_en'
+                )
+                ->havingRaw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) > 0')
+                ->orderByDesc('total_overtime_index')
+                ->limit(15)
+                ->get();
+
+            // Format response
+            $data = $topEmployees->map(function ($employee, $index) {
+                return [
+                    'rank' => $index + 1,
+                    'emp_id' => $employee->emp_id,
+                    'emp_no' => $employee->emp_no,
+                    'full_name' => $employee->full_name,
+                    'department' => $employee->dept_name_en,
+                    'cost_center' => $employee->costcenter_name,
+                    'total_overtime_index' => round((float)$employee->total_overtime_index, 2),
+                ];
+            });
+
+            return $this->sendResponse([
+                'data' => $data,
+                'total' => $topEmployees->count(),
+                'filter_metadata' => [
+                    'month' => (int)$month,
+                    'year' => (int)$year,
+                    'month_name' => $startDate->format('F'),
+                    'start_date' => $startDate->format('Y-m-d'),
+                    'end_date' => $endDate->format('Y-m-d'),
+                ],
+            ], 'Top 15 employees by overtime index retrieved successfully');
+        } catch (\Exception $e) {
+            Log::error('HR API Top Employees Overtime Error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->sendError('Failed to get top employees overtime: ' . $e->getMessage(), [], 500);
+        }
+    }
+
+    /**
+     * Top 10 Departments by Overtime Index
+     * GET /api/dashboard/hr/top-departments-overtime
+     *
+     * Query Parameters:
+     * - month: Month (1-12, default: current month)
+     * - year: Year (default: current year)
+     */
+    public function topDepartmentsOvertime(Request $request): JsonResponse
+    {
+        try {
+            // Get filter parameters
+            $month = $request->get('month', now()->month);
+            $year = $request->get('year', now()->year);
+
+            // Validate month
+            if ($month < 1 || $month > 12) {
+                $month = now()->month;
+            }
+
+            // Validate year
+            if ($year < 2000 || $year > 2100) {
+                $year = now()->year;
+            }
+
+            // Build date range for the selected month
+            $startDate = Carbon::create($year, $month, 1)->startOfMonth();
+            $endDate = $startDate->copy()->endOfMonth();
+
+            // If current month, don't go beyond today
+            if ($startDate->isSameMonth(now())) {
+                $endDate = now();
+            }
+
+            // Query: Get top 10 departments by total overtime index
+            // Use COALESCE to handle NULL values and sum only non-null values
+            $topDepartments = AttendanceByPeriod::query()
+                ->select(
+                    'employee_master.costcenter_name',
+                    'employee_master.dept_name_en',
+                    DB::raw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) as total_overtime_index'),
+                    DB::raw('COUNT(DISTINCT attendance_by_period.emp_id) as total_employees')
+                )
+                ->join('employee_master', 'attendance_by_period.emp_id', '=', 'employee_master.emp_id')
+                ->where(function($query) {
+                    $query->whereNotNull('attendance_by_period.total_otindex')
+                          ->orWhere('attendance_by_period.total_otindex', '!=', 0);
+                })
+                ->whereNotNull('employee_master.costcenter_name')
+                ->where(function($query) use ($startDate, $endDate) {
+                    $query->whereBetween('attendance_by_period.starttime', [
+                        $startDate->format('Y-m-d 00:00:00'),
+                        $endDate->format('Y-m-d 23:59:59')
+                    ])
+                    ->orWhereBetween('attendance_by_period.shiftstarttime', [
+                        $startDate->format('Y-m-d 00:00:00'),
+                        $endDate->format('Y-m-d 23:59:59')
+                    ]);
+                })
+                ->groupBy(
+                    'employee_master.costcenter_name',
+                    'employee_master.dept_name_en'
+                )
+                ->havingRaw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) > 0')
+                ->orderByDesc('total_overtime_index')
+                ->limit(10)
+                ->get();
+
+            // Format response
+            $data = $topDepartments->map(function ($department, $index) {
+                return [
+                    'rank' => $index + 1,
+                    'department' => $department->dept_name_en,
+                    'cost_center' => $department->costcenter_name,
+                    'total_overtime_index' => round((float)$department->total_overtime_index, 2),
+                    'total_employees' => (int)$department->total_employees,
+                ];
+            });
+
+            return $this->sendResponse([
+                'data' => $data,
+                'total' => $topDepartments->count(),
+                'filter_metadata' => [
+                    'month' => (int)$month,
+                    'year' => (int)$year,
+                    'month_name' => $startDate->format('F'),
+                    'start_date' => $startDate->format('Y-m-d'),
+                    'end_date' => $endDate->format('Y-m-d'),
+                ],
+            ], 'Top 10 departments by overtime index retrieved successfully');
+        } catch (\Exception $e) {
+            Log::error('HR API Top Departments Overtime Error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->sendError('Failed to get top departments overtime: ' . $e->getMessage(), [], 500);
         }
     }
 }
