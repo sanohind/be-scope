@@ -50,9 +50,16 @@ Schedule::command('hr:ensure-token')
     ->withoutOverlapping()
     ->appendOutputTo(storage_path('logs/hr-api.log'));
 
-// Daily stock calculation with five-minute granularity
-Schedule::command('daily-stock:calculate-five-minute')
-    ->everyFiveMinutes()
+Schedule::command('daily-stock:calculate')
+    ->dailyAt('06:00')
     ->withoutOverlapping()
     ->appendOutputTo(storage_path('logs/daily-stock.log'))
-    ->name('daily-stock-five-minute');
+    ->name('daily-stock-production');
+
+// Daily stock calculation with five-minute granularity
+// Commented out - using daily schedule in Kernel.php instead
+// Schedule::command('daily-stock:calculate-five-minute')
+//     ->everyFiveMinutes()
+//     ->withoutOverlapping()
+//     ->appendOutputTo(storage_path('logs/daily-stock.log'))
+//     ->name('daily-stock-five-minute');

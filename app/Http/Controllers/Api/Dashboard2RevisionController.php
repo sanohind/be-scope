@@ -195,11 +195,14 @@ class Dashboard2RevisionController extends ApiController
 
         $data = DB::connection('erp')
             ->table('view_warehouse_order')
-            ->select(['order_origin', 'status_desc'])
+            ->select([
+                DB::raw("CASE WHEN order_origin = 'JSC Production (Manual)' THEN 'Supply & Aux Consume' ELSE order_origin END as order_origin"),
+                'status_desc'
+            ])
             ->selectRaw('COUNT(*) as count')
             ->whereIn('ship_from', $warehouseCodes)
             ->whereBetween('order_date', [$dateRange['date_from'], $dateRange['date_to']])
-            ->groupBy(['order_origin', 'status_desc'])
+            ->groupBy([DB::raw("CASE WHEN order_origin = 'JSC Production (Manual)' THEN 'Supply & Aux Consume' ELSE order_origin END"), 'status_desc'])
             ->get()
             ->groupBy('order_origin')
             ->map(function ($group) {
@@ -217,7 +220,7 @@ class Dashboard2RevisionController extends ApiController
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
-                'days' => $dateRange['days_diff']
+                'days_diff' => $dateRange['days_diff']
             ]
         ]);
     }

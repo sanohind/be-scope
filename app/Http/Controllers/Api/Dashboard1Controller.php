@@ -234,8 +234,8 @@ class Dashboard1Controller extends ApiController
 
         $data = $query->select($groupBy)
             ->selectRaw('SUM(onhand) as total_onhand')
-            ->selectRaw('SUM(allocated) as total_allocated')
-            ->selectRaw('SUM(onorder) as total_onorder')
+            // ->selectRaw('SUM(allocated) as total_allocated')
+            // ->selectRaw('SUM(onorder) as total_onorder')
             ->selectRaw('((SUM(onhand) - SUM(allocated)) + SUM(onorder)) as available_to_promise')
             ->get();
 
