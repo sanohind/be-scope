@@ -25,8 +25,9 @@ class DailyStockController extends Controller
                 'string',
                 Rule::in(array_merge($this->allWarehouses, array_keys($this->warehouseCategories))),
             ],
-            'period_start' => 'nullable|date_format:Y-m-d',
-            'period_end' => 'nullable|date_format:Y-m-d',
+            // Use unified date parameters: date_from and date_to
+            'date_from' => 'nullable|date_format:Y-m-d',
+            'date_to' => 'nullable|date_format:Y-m-d',
         ]);
 
         // Determine which warehouses to query
@@ -48,13 +49,13 @@ class DailyStockController extends Controller
         $query = WarehouseStockSummary::query()
             ->whereIn('warehouse', $warehousesToQuery);
 
-        // Apply period filters if provided
-        if (!empty($validated['period_start'])) {
-            $query->where('period_start', '>=', $validated['period_start'] . ' 00:00:00');
+        // Apply date filters if provided (using unified date_from / date_to)
+        if (!empty($validated['date_from'])) {
+            $query->where('period_start', '>=', $validated['date_from'] . ' 00:00:00');
         }
 
-        if (!empty($validated['period_end'])) {
-            $query->where('period_end', '<=', $validated['period_end'] . ' 23:59:59');
+        if (!empty($validated['date_to'])) {
+            $query->where('period_end', '<=', $validated['date_to'] . ' 23:59:59');
         }
 
         $records = $query
@@ -98,8 +99,9 @@ class DailyStockController extends Controller
             'meta' => [
                 'warehouse_filter' => $validated['warehouse'] ?? 'all',
                 'warehouses_queried' => $warehousesToQuery,
-                'period_start_filter' => $validated['period_start'] ?? null,
-                'period_end_filter' => $validated['period_end'] ?? null,
+                // Expose unified date filters in the response meta
+                'date_from_filter' => $validated['date_from'] ?? null,
+                'date_to_filter' => $validated['date_to'] ?? null,
                 'total_records' => $records->count(),
             ],
             'warehouses' => $warehouses,
