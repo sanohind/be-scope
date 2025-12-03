@@ -87,10 +87,20 @@ class CalculateDailyStock extends Command
     private function resolveGranularity(?string $value): string
     {
         $allowed = config('daily_stock.allowed_granularities', ['daily']);
-        // Check environment variable first, then option, then config default
-        $granularity = $value
-            ?? getenv('DAILY_STOCK_GRANULARITY')
-            ?? config('daily_stock.default_granularity', 'daily');
+
+        // Check option value first (if provided and not empty)
+        if (! empty($value)) {
+            $granularity = $value;
+        } else {
+            // Check environment variable (if set and not empty)
+            $envGranularity = getenv('DAILY_STOCK_GRANULARITY');
+            if ($envGranularity !== false && ! empty($envGranularity)) {
+                $granularity = $envGranularity;
+            } else {
+                // Fallback to config default
+                $granularity = config('daily_stock.default_granularity', 'daily');
+            }
+        }
 
         if (! in_array($granularity, $allowed, true)) {
             throw new \InvalidArgumentException(sprintf(

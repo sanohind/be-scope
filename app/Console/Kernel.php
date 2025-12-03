@@ -62,6 +62,12 @@ class Kernel extends ConsoleKernel
                      ->appendOutputTo(storage_path('logs/daily-stock.log'))
                      ->name('daily-stock-production');
 
+        $schedule->command('stock:snapshot')
+                 ->dailyAt('06:00')
+                 ->withoutOverlapping()
+                 ->appendOutputTo(storage_path('logs/stock-snapshot.log'))
+                 ->name('stock-by-wh-snapshot');
+
         // if ($env === 'production') {
         //     // Production: daily at 06:00 with daily granularity (default)
         //     $schedule->command('daily-stock:calculate')
