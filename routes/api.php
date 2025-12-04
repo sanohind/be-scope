@@ -23,6 +23,7 @@ use App\Http\Controllers\Api\Dashboard8Controller;
 use App\Http\Controllers\Api\Dashboard1RevisionController;
 use App\Http\Controllers\Api\Dashboard2RevisionController;
 use App\Http\Controllers\Api\HrDashboardController;
+use App\Http\Controllers\Api\SalesAnalyticsController;
 
 /*
 |--------------------------------------------------------------------------
@@ -237,5 +238,13 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/top-employees-overtime', [HrDashboardController::class, 'topEmployeesOvertime']);
         Route::get('/top-departments-overtime', [HrDashboardController::class, 'topDepartmentsOvertime']);
         Route::get('/debug', [HrDashboardController::class, 'debug']);
+    });
+
+    // Sales Analytics: Bar Chart Data
+    Route::prefix('sales-analytics')->group(function () {
+        Route::get('/bar-chart', [SalesAnalyticsController::class, 'getBarChartData']);
+        Route::get('/sales-shipment', [SalesAnalyticsController::class, 'getSalesShipmentByPeriod']);
+        Route::get('/so-monitor', [SalesAnalyticsController::class, 'getSoMonitorByPeriod']);
+        Route::get('/combined-details', [SalesAnalyticsController::class, 'getCombinedDataWithDetails']);
     });
 });

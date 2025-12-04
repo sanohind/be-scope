@@ -470,7 +470,7 @@ class Dashboard6Controller extends ApiController
      */
     public function shipmentTable(Request $request): JsonResponse
     {
-        $perPage = min($request->get('per_page', 10), 100);
+        $perPage = $request->get('per_page', 10);
         $sortBy = $request->get('sort_by', 'delivery_date');
         $sortOrder = $request->get('sort_order', 'desc');
         $search = $request->get('search', '');
@@ -531,6 +531,33 @@ class Dashboard6Controller extends ApiController
         } else {
             $query->orderBy($sortBy, $sortOrder);
         }
+
+        // Check if 'all' parameter is requested
+        if (strtolower($perPage) === 'all') {
+            // Get all results without pagination
+            $shipments = $query->get();
+
+            return response()->json([
+                'data' => $shipments,
+                'pagination' => [
+                    'current_page' => 1,
+                    'per_page' => $shipments->count(),
+                    'total' => $shipments->count(),
+                    'last_page' => 1,
+                    'from' => $shipments->count() > 0 ? 1 : null,
+                    'to' => $shipments->count()
+                ],
+                'filters' => [
+                    'search' => $search,
+                    'sort_by' => $sortBy,
+                    'sort_order' => $sortOrder,
+                    'shipment_status' => 'Approved'
+                ]
+            ]);
+        }
+
+        // Ensure per_page is a valid number and within limits
+        $perPage = min((int)$perPage, 100);
 
         // Get paginated results
         $shipments = $query->paginate($perPage);

@@ -29,6 +29,8 @@ class StockByWhSnapshot extends Model
         'max_stock',
         'unit',
         'location',
+        'group_type',
+        'group_type_desc',
         'created_at',
     ];
 

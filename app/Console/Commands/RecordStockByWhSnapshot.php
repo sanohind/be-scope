@@ -68,6 +68,8 @@ class RecordStockByWhSnapshot extends Command
                                 'max_stock' => $record->max_stock,
                                 'unit' => $record->unit,
                                 'location' => $record->location,
+                                'group_type' => $record->group_type,
+                                'group_type_desc' => $record->group_type_desc,
                                 'created_at' => now(),
                             ];
                         })->toArray();

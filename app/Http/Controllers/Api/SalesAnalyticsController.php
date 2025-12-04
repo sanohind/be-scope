@@ -1,0 +1,360 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Models\SalesShipment;
+use App\Models\SoMonitor;
+use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
+
+class SalesAnalyticsController extends ApiController
+{
+    /**
+     * Get bar chart data combining SalesShipment and SoMonitor
+     * 
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function getBarChartData(Request $request): JsonResponse
+    {
+        try {
+            // Validate input parameters
+            $year = $request->input('year');
+            $period = $request->input('period');
+
+            // Build query for SalesShipment (from so_invoice_line)
+            $salesShipmentQuery = DB::connection('erp')->table('so_invoice_line')
+                ->select(
+                    DB::raw('YEAR(delivery_date) as year'),
+                    DB::raw('MONTH(delivery_date) as period'),
+                    DB::raw('SUM(delivered_qty) as total_delivery'),
+                    DB::raw('0 as total_po')
+                );
+
+            // Apply year filter if provided
+            if ($year) {
+                $salesShipmentQuery->whereRaw('YEAR(delivery_date) = ?', [$year]);
+            }
+
+            // Apply period filter if provided
+            if ($period) {
+                $salesShipmentQuery->whereRaw('MONTH(delivery_date) = ?', [$period]);
+            }
+
+            $salesShipmentQuery->groupBy(
+                DB::raw('YEAR(delivery_date)'),
+                DB::raw('MONTH(delivery_date)')
+            );
+
+            // Build query for SoMonitor
+            $soMonitorQuery = DB::connection('erp')->table('so_monitor')
+                ->select(
+                    DB::raw('YEAR(planned_delivery_date) as year'),
+                    DB::raw('MONTH(planned_delivery_date) as period'),
+                    DB::raw('0 as total_delivery'),
+                    DB::raw('SUM(order_qty) as total_po')
+                )
+                ->where('sequence', 0);
+
+            if ($year) {
+                $soMonitorQuery->whereRaw('YEAR(planned_delivery_date) = ?', [$year]);
+            }
+
+            if ($period) {
+                $soMonitorQuery->whereRaw('MONTH(planned_delivery_date) = ?', [$period]);
+            }
+
+            $soMonitorQuery->groupBy(
+                DB::raw('YEAR(planned_delivery_date)'),
+                DB::raw('MONTH(planned_delivery_date)')
+            );
+
+            // Get data from both queries separately and merge in PHP
+            $salesShipmentData = $salesShipmentQuery->get();
+            $soMonitorData = $soMonitorQuery->get();
+
+            // Merge data by year and period
+            $mergedData = [];
+            
+            foreach ($salesShipmentData as $row) {
+                $key = $row->year . '-' . $row->period;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_delivery'] += (float)$row->total_delivery;
+            }
+
+            foreach ($soMonitorData as $row) {
+                $key = $row->year . '-' . $row->period;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_po'] += (float)$row->total_po;
+            }
+
+            // Reset array keys and sort
+            $result = array_values($mergedData);
+            usort($result, function ($a, $b) {
+                if ($a['year'] !== $b['year']) {
+                    return $a['year'] - $b['year'];
+                }
+                return $a['period'] - $b['period'];
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $result,
+                'count' => count($result),
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch bar chart data',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get sales shipment data by period
+     * 
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function getSalesShipmentByPeriod(Request $request): JsonResponse
+    {
+        try {
+            $year = $request->input('year');
+            $period = $request->input('period');
+
+            $query = DB::connection('erp')->table('so_invoice_line')
+                ->select(
+                    DB::raw('YEAR(delivery_date) as year'),
+                    DB::raw('MONTH(delivery_date) as period'),
+                    DB::raw('SUM(delivered_qty) as total_delivery')
+                )
+                ->groupBy(
+                    DB::raw('YEAR(delivery_date)'),
+                    DB::raw('MONTH(delivery_date)')
+                );
+
+            if ($year) {
+                $query->whereRaw('YEAR(delivery_date) = ?', [$year]);
+            }
+
+            if ($period) {
+                $query->whereRaw('MONTH(delivery_date) = ?', [$period]);
+            }
+
+            $data = $query
+                ->orderBy('year')
+                ->orderBy('period')
+                ->get();
+
+            return response()->json([
+                'success' => true,
+                'data' => $data,
+                'count' => count($data),
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch sales shipment data',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get SO monitor data by period
+     * 
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function getSoMonitorByPeriod(Request $request): JsonResponse
+    {
+        try {
+            $year = $request->input('year');
+            $period = $request->input('period');
+
+            $query = DB::connection('erp')->table('so_monitor')
+                ->select(
+                    'year',
+                    'period',
+                    DB::raw('SUM(total_po) as total_po')
+                )
+                ->where('sequence', 0)
+                ->groupBy('year', 'period');
+
+            if ($year) {
+                $query->where('year', $year);
+            }
+
+            if ($period) {
+                $query->where('period', $period);
+            }
+
+            $data = $query
+                ->orderBy('year')
+                ->orderBy('period')
+                ->get();
+
+            return response()->json([
+                'success' => true,
+                'data' => $data,
+                'count' => count($data),
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch SO monitor data',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get combined data with details by business partner
+     * 
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function getCombinedDataWithDetails(Request $request): JsonResponse
+    {
+        try {
+            $year = $request->input('year');
+            $period = $request->input('period');
+
+            // Get sales shipment details
+            $salesShipmentQuery = DB::connection('erp')->table('so_invoice_line')
+                ->select(
+                    DB::raw('YEAR(delivery_date) as year'),
+                    DB::raw('MONTH(delivery_date) as period'),
+                    'bp_code',
+                    'bp_name',
+                    DB::raw('SUM(delivered_qty) as total_delivery'),
+                    DB::raw('0 as total_po')
+                );
+
+            if ($year) {
+                $salesShipmentQuery->whereRaw('YEAR(delivery_date) = ?', [$year]);
+            }
+
+            if ($period) {
+                $salesShipmentQuery->whereRaw('MONTH(delivery_date) = ?', [$period]);
+            }
+
+            $salesShipmentQuery->groupBy(
+                DB::raw('YEAR(delivery_date)'),
+                DB::raw('MONTH(delivery_date)'),
+                'bp_code',
+                'bp_name'
+            );
+
+            // Get SO monitor details
+            $soMonitorQuery = DB::connection('erp')->table('so_monitor')
+                ->select(
+                    'year',
+                    'period',
+                    'bp_code',
+                    'bp_name',
+                    DB::raw('0 as total_delivery'),
+                    DB::raw('SUM(total_po) as total_po')
+                )
+                ->where('sequence', 0);
+
+            if ($year) {
+                $soMonitorQuery->where('year', $year);
+            }
+
+            if ($period) {
+                $soMonitorQuery->where('period', $period);
+            }
+
+            $soMonitorQuery->groupBy('year', 'period', 'bp_code', 'bp_name');
+
+            // Get data from both queries separately and merge in PHP
+            $salesShipmentData = $salesShipmentQuery->get();
+            $soMonitorData = $soMonitorQuery->get();
+
+            // Merge data by year, period, and bp_code
+            $mergedData = [];
+            
+            foreach ($salesShipmentData as $row) {
+                $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'bp_code' => $row->bp_code,
+                        'bp_name' => $row->bp_name,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_delivery'] += (float)$row->total_delivery;
+            }
+
+            foreach ($soMonitorData as $row) {
+                $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'bp_code' => $row->bp_code,
+                        'bp_name' => $row->bp_name,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_po'] += (float)$row->total_po;
+            }
+
+            $result = array_values($mergedData);
+            usort($result, function ($a, $b) {
+                if ($a['year'] !== $b['year']) {
+                    return $a['year'] - $b['year'];
+                }
+                if ($a['period'] !== $b['period']) {
+                    return $a['period'] - $b['period'];
+                }
+                return strcmp($a['bp_code'], $b['bp_code']);
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $result,
+                'count' => count($result),
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch combined data',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+}

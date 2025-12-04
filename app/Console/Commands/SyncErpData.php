@@ -129,6 +129,20 @@ class SyncErpData extends Command
             $successRecords += $result['success'];
             $failedRecords += $result['failed'];
 
+            // Sync SoMonitor
+            $this->info('Syncing SoMonitor...');
+            $result = $this->syncSoMonitor();
+            $totalRecords += $result['total'];
+            $successRecords += $result['success'];
+            $failedRecords += $result['failed'];
+
+            // Sync SalesShipment
+            $this->info('Syncing SalesShipment...');
+            $result = $this->syncSalesShipment();
+            $totalRecords += $result['total'];
+            $successRecords += $result['success'];
+            $failedRecords += $result['failed'];
+
             // Update sync log with final results
             $syncLog->status = 'completed';
             $syncLog->completed_at = now();
@@ -906,6 +920,167 @@ class SyncErpData extends Command
             'skipped' => $skipped,
             'total' => $total
         ];
+    }
+
+    private function syncSoMonitor()
+    {
+        try {
+            $success = 0;
+            $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
+            $total = 0;
+            $chunkSize = 500;
+
+            // SoMonitor unique key: year + period + bp_code
+            $uniqueKeys = ['year', 'period', 'bp_code'];
+
+            $query = DB::connection('erp')->table('so_monitor')
+                ->select(
+                    DB::raw('YEAR(planned_delivery_date) as year'),
+                    DB::raw('MONTH(planned_delivery_date) as period'),
+                    'bp_code',
+                    'bp_name',
+                    DB::raw('SUM(order_qty) as total_po')
+                )
+                ->where('sequence', 0)
+                ->groupBy(
+                    DB::raw('YEAR(planned_delivery_date)'),
+                    DB::raw('MONTH(planned_delivery_date)'),
+                    'bp_code',
+                    'bp_name'
+                );
+
+            // Apply date filter if not initialization
+            if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+                $query->whereBetween('planned_delivery_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            }
+
+            $query->orderBy('year')->orderBy('period')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
+                foreach ($records as $record) {
+                    try {
+                        $data = [
+                            'year' => $record->year,
+                            'period' => $record->period,
+                            'bp_code' => $record->bp_code,
+                            'bp_name' => $record->bp_name,
+                            'total_po' => $record->total_po,
+                        ];
+
+                        $result = $this->upsertRecord('so_monitor', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $this->warn("Failed to sync SoMonitor record (year: {$record->year}, period: {$record->period}, bp_code: {$record->bp_code}): " . $e->getMessage());
+                    }
+                }
+
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " SoMonitor records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
+                }
+
+                gc_collect_cycles();
+            });
+
+            $this->info("SoMonitor sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
+
+        } catch (Exception $e) {
+            $this->error("Error syncing SoMonitor: " . $e->getMessage());
+            return ['total' => 0, 'success' => 0, 'failed' => 0];
+        }
+    }
+
+    private function syncSalesShipment()
+    {
+        try {
+            $success = 0;
+            $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
+            $total = 0;
+            $chunkSize = 500;
+
+            // SalesShipment unique key: year + period + bp_code
+            $uniqueKeys = ['year', 'period', 'bp_code'];
+
+            $query = DB::connection('erp')->table('so_invoice_line')
+                ->select(
+                    DB::raw('YEAR(delivery_date) as year'),
+                    DB::raw('MONTH(delivery_date) as period'),
+                    'bp_code',
+                    'bp_name',
+                    DB::raw('SUM(delivered_qty) as total_delivery')
+                )
+                ->groupBy(
+                    DB::raw('YEAR(delivery_date)'),
+                    DB::raw('MONTH(delivery_date)'),
+                    'bp_code',
+                    'bp_name'
+                );
+
+            // Apply date filter if not initialization
+            if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+                $query->whereBetween('delivery_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d')]);
+            }
+
+            $query->orderBy('year')->orderBy('period')->orderBy('bp_code')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
+                foreach ($records as $record) {
+                    try {
+                        $data = [
+                            'year' => $record->year,
+                            'period' => $record->period,
+                            'bp_code' => $record->bp_code,
+                            'bp_name' => $record->bp_name,
+                            'total_delivery' => $record->total_delivery,
+                        ];
+
+                        $result = $this->upsertRecord('sales_shipment', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $this->warn("Failed to sync SalesShipment record (year: {$record->year}, period: {$record->period}, bp_code: {$record->bp_code}): " . $e->getMessage());
+                    }
+                }
+
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " SalesShipment records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
+                }
+
+                gc_collect_cycles();
+            });
+
+            $this->info("SalesShipment sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
+
+        } catch (Exception $e) {
+            $this->error("Error syncing SalesShipment: " . $e->getMessage());
+            return ['total' => 0, 'success' => 0, 'failed' => 0];
+        }
     }
 
     /**
