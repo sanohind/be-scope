@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\StockByWh;
+use App\Models\StockByWhSnapshot;
+use App\Models\WarehouseStockSummary;
 use App\Models\InventoryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -13,6 +15,7 @@ class Dashboard1RevisionController extends ApiController
 {
     /**
      * Get warehouse parameter from request or throw error
+     * Supports both individual warehouse codes and warehouse group aliases
      */
     private function getWarehouse(Request $request): string
     {
@@ -22,9 +25,23 @@ class Dashboard1RevisionController extends ApiController
             abort(400, 'Warehouse parameter is required');
         }
 
+        // Warehouse group aliases
+        $aliases = [
+            'RM' => ['WHRM01', 'WHRM02', 'WHMT01'],
+            'FG' => ['WHFG01', 'WHFG02'],
+        ];
+
         $validWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+
+        // Check if warehouse is an alias
+        if (isset($aliases[$warehouse])) {
+            // For now, return the first warehouse in the group
+            // In future, this could be  to handle multiple warehouses
+            return $aliases[$warehouse][0];
+        }
+
         if (!in_array($warehouse, $validWarehouses)) {
-            abort(400, 'Invalid warehouse code');
+            abort(400, 'Invalid warehouse code or alias');
         }
 
         return $warehouse;
@@ -32,18 +49,31 @@ class Dashboard1RevisionController extends ApiController
 
     /**
      * Get date range parameters from request
-     * Returns array with date_from and date_to
+     * Returns array with date_from and date_to based on period
      * Default: current month if not specified
      */
-    private function getDateRange(Request $request, int $defaultDays = 30): array
+    private function getDateRange(Request $request, int $defaultDays = 30, string $period = 'daily'): array
     {
         $dateFrom = $request->input('date_from');
         $dateTo = $request->input('date_to');
 
-        // If no dates provided, use current month
+        // If no dates provided, use default based on period
         if (!$dateFrom && !$dateTo) {
-            $dateFrom = Carbon::now()->startOfMonth();
-            $dateTo = Carbon::now();
+            switch ($period) {
+                case 'yearly':
+                    $dateFrom = Carbon::now()->startOfYear();
+                    $dateTo = Carbon::now();
+                    break;
+                case 'monthly':
+                    $dateFrom = Carbon::now()->startOfMonth();
+                    $dateTo = Carbon::now();
+                    break;
+                case 'daily':
+                default:
+                    $dateFrom = Carbon::now()->startOfMonth();
+                    $dateTo = Carbon::now();
+                    break;
+            }
         } else {
             // Parse provided dates
             $dateFrom = $dateFrom ? Carbon::parse($dateFrom) : Carbon::now()->subDays($defaultDays);
@@ -53,8 +83,106 @@ class Dashboard1RevisionController extends ApiController
         return [
             'date_from' => $dateFrom->format('Y-m-d'),
             'date_to' => $dateTo->format('Y-m-d 23:59:59'),
+            'date_from_carbon' => $dateFrom,
+            'date_to_carbon' => $dateTo,
             'days_diff' => $dateFrom->diffInDays($dateTo)
         ];
+    }
+
+    /**
+     * Get period parameter from request (daily, monthly, yearly)
+     */
+    private function getPeriod(Request $request): string
+    {
+        $period = $request->input('period', 'daily');
+        if (!in_array($period, ['daily', 'monthly', 'yearly'], true)) {
+            $period = 'daily';
+        }
+        return $period;
+    }
+
+    /**
+     * Get snapshot date based on period and date range
+     * For detail queries, we use the latest snapshot within date range
+     * For monthly/yearly, returns latest snapshot in the period
+     */
+    private function getSnapshotDate(Request $request, string $period = 'daily'): ?string
+    {
+        $dateRange = $this->getDateRange($request, 30, $period);
+
+        // For monthly/yearly, get latest snapshot in the last period
+        if ($period === 'monthly') {
+            // Get latest snapshot in the last month of the range
+            $lastMonth = $dateRange['date_to_carbon']->copy()->startOfMonth();
+            $latestSnapshot = StockByWhSnapshot::whereBetween('snapshot_date', [
+                $lastMonth->format('Y-m-d'),
+                $dateRange['date_to']
+            ])->max('snapshot_date');
+        } elseif ($period === 'yearly') {
+            // Get latest snapshot in the last year of the range
+            $lastYear = $dateRange['date_to_carbon']->copy()->startOfYear();
+            $latestSnapshot = StockByWhSnapshot::whereBetween('snapshot_date', [
+                $lastYear->format('Y-m-d'),
+                $dateRange['date_to']
+            ])->max('snapshot_date');
+        } else {
+            // Daily: Get latest snapshot within range
+            $latestSnapshot = StockByWhSnapshot::whereBetween('snapshot_date', [
+                $dateRange['date_from'],
+                $dateRange['date_to']
+            ])->max('snapshot_date');
+        }
+
+        return $latestSnapshot ? Carbon::parse($latestSnapshot)->format('Y-m-d') : null;
+    }
+
+    /**
+     * Get snapshot dates grouped by period for trend analysis
+     * Returns array of snapshot dates per period (month/year)
+     */
+    private function getSnapshotDatesByPeriod(Request $request, string $period = 'daily'): array
+    {
+        $dateRange = $this->getDateRange($request, 30, $period);
+
+        if ($period === 'monthly') {
+            // Get latest snapshot for each month in the range
+            $snapshots = StockByWhSnapshot::selectRaw("
+                    FORMAT(snapshot_date, 'yyyy-MM') as period,
+                    MAX(snapshot_date) as latest_snapshot
+                ")
+                ->whereBetween('snapshot_date', [
+                    $dateRange['date_from'],
+                    $dateRange['date_to']
+                ])
+                ->groupByRaw("FORMAT(snapshot_date, 'yyyy-MM')")
+                ->orderByRaw("FORMAT(snapshot_date, 'yyyy-MM')")
+                ->get();
+
+            return $snapshots->pluck('latest_snapshot', 'period')->toArray();
+        } elseif ($period === 'yearly') {
+            // Get latest snapshot for each year in the range
+            $snapshots = StockByWhSnapshot::selectRaw("
+                    FORMAT(snapshot_date, 'yyyy') as period,
+                    MAX(snapshot_date) as latest_snapshot
+                ")
+                ->whereBetween('snapshot_date', [
+                    $dateRange['date_from'],
+                    $dateRange['date_to']
+                ])
+                ->groupByRaw("FORMAT(snapshot_date, 'yyyy')")
+                ->orderByRaw("FORMAT(snapshot_date, 'yyyy')")
+                ->get();
+
+            return $snapshots->pluck('latest_snapshot', 'period')->toArray();
+        } else {
+            // Daily: Return single latest snapshot
+            $latest = StockByWhSnapshot::whereBetween('snapshot_date', [
+                $dateRange['date_from'],
+                $dateRange['date_to']
+            ])->max('snapshot_date');
+
+            return $latest ? ['latest' => $latest] : [];
+        }
     }
 
     /**
@@ -72,29 +200,112 @@ class Dashboard1RevisionController extends ApiController
     }
 
     /**
+     * Get database driver name for a connection
+     */
+    private function getDatabaseDriver(?string $connection = null): string
+    {
+        $conn = $connection ? DB::connection($connection) : DB::connection();
+        return $conn->getDriverName();
+    }
+
+    /**
+     * Get date format expression based on period and database driver
+     * Override parent method with specific implementation
+     * Uses 'period_start' as the date field by default
+     */
+    protected function getDateFormatByPeriod($period, $dateField = 'period_start', $query = null)
+    {
+        $driver = $this->getDatabaseDriver();
+
+        if ($driver === 'mysql' || $driver === 'mariadb') {
+            // MySQL/MariaDB syntax
+            return match($period) {
+                'daily' => "DATE($dateField)",
+                'monthly' => "DATE_FORMAT($dateField, '%Y-%m')",
+                'yearly' => "CAST(YEAR($dateField) AS CHAR)",
+                default => "DATE($dateField)",
+            };
+        } elseif ($driver === 'sqlsrv') {
+            // SQL Server syntax
+            return match($period) {
+                'daily' => "CAST($dateField AS DATE)",
+                'monthly' => "FORMAT($dateField, 'yyyy-MM')",
+                'yearly' => "FORMAT($dateField, 'yyyy')",
+                default => "CAST($dateField AS DATE)",
+            };
+        } else {
+            // Default to MySQL syntax for other databases
+            return match($period) {
+                'daily' => "DATE($dateField)",
+                'monthly' => "DATE_FORMAT($dateField, '%Y-%m')",
+                'yearly' => "CAST(YEAR($dateField) AS CHAR)",
+                default => "DATE($dateField)",
+            };
+        }
+    }
+
+    /**
+     * Convert SQL Server syntax to MySQL syntax if needed
+     */
+    private function adaptSqlForDriver(string $sql, ?string $connection = null): string
+    {
+        $driver = $this->getDatabaseDriver($connection);
+
+        if ($driver === 'mysql') {
+            // Replace SQL Server syntax with MySQL syntax
+            $sql = preg_replace('/\bTRY_CAST\s*\(/i', 'CAST(', $sql);
+            $sql = preg_replace('/\bISNULL\s*\(/i', 'IFNULL(', $sql);
+            $sql = preg_replace('/\bTOP\s+(\d+)/i', '', $sql); // Remove TOP, will add LIMIT at end
+            $sql = preg_replace('/\[(\w+)\]/', '`$1`', $sql); // Replace [column] with `column`
+            $sql = preg_replace('/\bDATEADD\s*\(\s*month\s*,\s*(-?\d+)\s*,\s*([^)]+)\s*\)/i', 'DATE_ADD($2, INTERVAL $1 MONTH)', $sql);
+            $sql = preg_replace('/\bGETDATE\s*\(\)/i', 'NOW()', $sql);
+            $sql = preg_replace('/\bDATEDIFF\s*\(\s*day\s*,\s*([^,]+)\s*,\s*([^)]+)\s*\)/i', 'DATEDIFF($2, $1)', $sql);
+
+            // Add LIMIT if TOP was removed and ORDER BY exists
+            if (preg_match('/\bSELECT\s+(.*?)\s+FROM/i', $sql, $matches)) {
+                $hasTop = preg_match('/\bTOP\s+\d+/i', $sql);
+                if (!$hasTop && preg_match('/\bORDER\s+BY\s+.*$/i', $sql, $orderMatch)) {
+                    // Check if LIMIT already exists
+                    if (!preg_match('/\bLIMIT\s+\d+/i', $sql)) {
+                        // Try to extract TOP number from original query if it was there
+                        // For now, we'll handle this in the calling method
+                    }
+                }
+            }
+        }
+
+        return $sql;
+    }
+
+    /**
      * CHART 1: Comprehensive KPI Cards
      * 6 metrics combining stock + transaction data
      * DATE FILTER: Applied to transaction metrics only
+     * Uses snapshot data for historical stock view
      */
     public function comprehensiveKpi(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 30);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
 
-        // Stock Metrics (no date filter - current snapshot)
-        $totalSku = DB::connection('erp')->table('stockbywh')
-            ->where('warehouse', $warehouse)
-            ->distinct()
-            ->count('partno');
+        // Stock Metrics (use snapshot for historical view)
+        $stockQuery = $snapshotDate
+            ? StockByWhSnapshot::where('snapshot_date', $snapshotDate)->where('warehouse', $warehouse)
+            : StockByWh::where('warehouse', $warehouse);
 
-        $totalOnhand = DB::connection('erp')->table('stockbywh')
-            ->where('warehouse', $warehouse)
-            ->sum('onhand');
+        // Apply filters
+        if ($request->has('customer')) {
+            $stockQuery->where('customer', $request->customer);
+        }
+        if ($request->has('group_type_desc')) {
+            $stockQuery->where('group_type_desc', $request->group_type_desc);
+        }
 
-        $criticalItems = DB::connection('erp')->table('stockbywh')
-            ->where('warehouse', $warehouse)
-            ->whereRaw('onhand < safety_stock')
-            ->count();
+        $totalSku = (clone $stockQuery)->distinct()->count('partno');
+        $totalOnhand = (clone $stockQuery)->sum('onhand');
+        $criticalItems = (clone $stockQuery)->whereRaw('onhand < safety_stock')->count();
 
         // Transaction Metrics (with date filter)
         $transInPeriod = DB::connection('erp')->table('inventory_transaction')
@@ -126,11 +337,13 @@ class Dashboard1RevisionController extends ApiController
             'critical_items' => $criticalItems,
             'trans_in_period' => $transInPeriod,
             'net_movement' => round($netMovement ?? 0, 2),
+            'snapshot_date' => $snapshotDate,
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
                 'days' => $dateRange['days_diff']
-            ]
+            ],
+            'period' => $period
         ]);
     }
 
@@ -138,16 +351,64 @@ class Dashboard1RevisionController extends ApiController
      * CHART 2: Stock Health Distribution + Activity
      * Donut chart with transaction activity
      * DATE FILTER: Applied to transaction counts
+     * Uses snapshot data for historical stock view
+     * Grouped by date (snapshot_date) with period filtering
      */
     public function stockHealthDistribution(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 30);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
 
+        // Detect database driver for proper date formatting
+        $driver = $this->getDatabaseDriver();
+
+        // Determine date grouping based on period and database driver
+        $dateGrouping = match($period) {
+            'monthly' => $driver === 'mysql'
+                ? "DATE_FORMAT(s.snapshot_date, '%Y-%m')"
+                : "FORMAT(s.snapshot_date, 'yyyy-MM')",
+            'yearly' => $driver === 'mysql'
+                ? "DATE_FORMAT(s.snapshot_date, '%Y')"
+                : "FORMAT(s.snapshot_date, 'yyyy')",
+            default => $driver === 'mysql'
+                ? "DATE(s.snapshot_date)"
+                : "CAST(s.snapshot_date AS DATE)"
+        };
+
+        $dateLabel = match($period) {
+            'monthly' => 'month',
+            'yearly' => 'year',
+            default => 'date'
+        };
+
+        // Build where conditions
+        $whereConditions = ["s.warehouse = ?"];
+        $params = [$warehouse];
+
+        // Add date range filter for snapshot_date
+        $whereConditions[] = "s.snapshot_date >= ? AND s.snapshot_date <= ?";
+        $params[] = $dateRange['date_from'];
+        $params[] = $dateRange['date_to'];
+
+        if ($request->has('customer')) {
+            $whereConditions[] = "s.customer = ?";
+            $params[] = $request->customer;
+        }
+
+        if ($request->has('group_type_desc')) {
+            $whereConditions[] = "s.group_type_desc = ?";
+            $params[] = $request->group_type_desc;
+        }
+
+        $whereClause = implode(' AND ', $whereConditions);
+
+        // Build date filter for transaction join
         $dateFilter = $this->buildDateFilter('t', $dateRange);
 
-        $data = DB::connection('erp')->select("
+        $sql = "
             SELECT
+                {$dateGrouping} as {$dateLabel},
                 CASE
                     WHEN s.onhand < s.min_stock THEN 'Critical'
                     WHEN s.onhand < s.safety_stock THEN 'Low Stock'
@@ -158,27 +419,52 @@ class Dashboard1RevisionController extends ApiController
                 SUM(s.onhand) as total_onhand,
                 COUNT(t.trans_id) as trans_count,
                 COUNT(t.shipment) as total_shipment
-            FROM stockbywh s
+            FROM stock_by_wh_snapshots s
             LEFT JOIN inventory_transaction t
                 ON s.partno = t.partno
                 AND s.warehouse = t.warehouse
-                AND $dateFilter
-            WHERE s.warehouse = ?
+                AND {$dateFilter}
+            WHERE {$whereClause}
             GROUP BY
+                {$dateGrouping},
                 CASE
                     WHEN s.onhand < s.min_stock THEN 'Critical'
                     WHEN s.onhand < s.safety_stock THEN 'Low Stock'
                     WHEN s.onhand > s.max_stock THEN 'Overstock'
                     ELSE 'Normal'
                 END
-        ", [$warehouse]);
+            ORDER BY {$dateGrouping}
+        ";
+
+        $data = DB::select($sql, $params);
+
+        // Group data by period for cleaner response
+        $groupedData = [];
+        foreach ($data as $row) {
+            $periodKey = $row->{$dateLabel};
+            if (!isset($groupedData[$periodKey])) {
+                $groupedData[$periodKey] = [];
+            }
+            $groupedData[$periodKey][] = $row;
+        }
+
+        // Format response based on period
+        $formattedData = [];
+        foreach ($groupedData as $periodKey => $items) {
+            $formattedData[] = [
+                $dateLabel => $periodKey,
+                'data' => $items
+            ];
+        }
 
         return response()->json([
-            'data' => $data,
+            'data' => $formattedData,
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to']
-            ]
+            ],
+            'period' => $period,
+            'grouping' => $dateLabel
         ]);
     }
 
@@ -186,39 +472,57 @@ class Dashboard1RevisionController extends ApiController
      * CHART 3: Stock Movement Trend
      * Area chart showing receipt, shipment, and net movement
      * DATE FILTER: Applied to entire trend
+     * Uses WarehouseStockSummary for trend data
      */
     public function stockMovementTrend(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 30);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
 
-        $data = DB::connection('erp')->select("
-            SELECT
-                CAST(trans_date AS DATE) as date,
-                SUM(CASE WHEN receipt IS NOT NULL AND receipt != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as total_receipt,
-                SUM(CASE WHEN shipment IS NOT NULL AND shipment != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2)) ELSE 0 END) as total_shipment,
-                SUM(CASE
-                    WHEN receipt IS NOT NULL AND receipt != '' THEN TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2))
-                    WHEN shipment IS NOT NULL AND shipment != '' THEN -TRY_CAST(ISNULL(qty, 0) AS DECIMAL(18,2))
-                    ELSE 0
-                END) as net_movement,
-                COUNT(trans_id) as trans_count
-            FROM inventory_transaction
-            WHERE warehouse = ?
-                AND trans_date >= ?
-                AND trans_date <= ?
-            GROUP BY CAST(trans_date AS DATE)
-            ORDER BY date
-        ", [$warehouse, $dateRange['date_from'], $dateRange['date_to']]);
+        // Map period to granularity
+        $granularity = match($period) {
+            'yearly' => 'yearly',
+            'monthly' => 'monthly',
+            default => 'daily'
+        };
 
-        // Current total onhand for reference
-        $currentOnhand = DB::connection('erp')->table('stockbywh')
-            ->where('warehouse', $warehouse)
-            ->sum('onhand');
+        // Build date/period expression based on database driver
+        $dateFormat = $this->getDateFormatByPeriod($period);
+
+        // For monthly and yearly, always aggregate from daily data
+        $queryGranularity = 'daily';
+
+        $query = WarehouseStockSummary::where('warehouse', $warehouse)
+            ->where('granularity', $queryGranularity)
+            ->whereBetween('period_start', [
+                $dateRange['date_from_carbon']->startOfDay(),
+                $dateRange['date_to_carbon']->endOfDay()
+            ]);
+
+        $data = $query->selectRaw("
+                $dateFormat as period,
+                SUM(onhand_total) as total_onhand,
+                SUM(receipt_total) as total_receipt,
+                SUM(issue_total) as total_shipment,
+                SUM(receipt_total - issue_total) as net_movement
+            ")
+            ->groupByRaw($dateFormat)
+            ->orderByRaw($dateFormat)
+            ->get();
+
+        // Get current total onhand from snapshot or current data
+        $snapshotDate = $this->getSnapshotDate($request, $period);
+        $currentOnhand = $snapshotDate
+            ? StockByWhSnapshot::where('snapshot_date', $snapshotDate)->where('warehouse', $warehouse)->sum('onhand')
+            : StockByWh::where('warehouse', $warehouse)->sum('onhand');
 
         return response()->json([
             'trend_data' => $data,
+            'period' => $period,
+            'granularity' => $granularity,
             'current_total_onhand' => round($currentOnhand, 2),
+            'snapshot_date' => $snapshotDate,
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
@@ -231,6 +535,7 @@ class Dashboard1RevisionController extends ApiController
      * CHART 4: Top 15 Items Without Issue Activity
      * Highlights SKUs with large on-hand quantity but little to no "Issue" transactions
      * DATE FILTER: Applied to transaction summary (default 90 days)
+     * Uses snapshot data for historical stock view
      */
     public function topCriticalItems(Request $request): JsonResponse
     {
@@ -314,6 +619,7 @@ class Dashboard1RevisionController extends ApiController
      * CHART 5: Top 15 Most Active Items & Top 15 Most Non-Active Items
      * Horizontal bar chart with high transaction frequency + items with oldest last transaction
      * DATE FILTER: Applied to transaction analysis
+     * Uses snapshot data for historical stock view
      */
     public function mostActiveItems(Request $request): JsonResponse
     {
@@ -406,15 +712,42 @@ class Dashboard1RevisionController extends ApiController
      * CHART 6: Stock & Activity by Product Type
      * Combo chart (columns + lines)
      * DATE FILTER: Applied to transaction counts and turnover calculation
+     * Uses snapshot data for historical stock view
      */
     public function stockActivityByProductType(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 30);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
 
         $dateFilter = $this->buildDateFilter('t', $dateRange);
 
-        $data = DB::connection('erp')->select("
+        // Use snapshot table if available
+        $stockTable = $snapshotDate ? 'stock_by_wh_snapshots' : 'stockbywh';
+        $stockConnection = $snapshotDate ? null : 'erp';
+
+        $whereConditions = ["s.warehouse = ?"];
+        $params = [$warehouse];
+
+        if ($snapshotDate) {
+            $whereConditions[] = "s.snapshot_date = ?";
+            $params[] = $snapshotDate;
+        }
+
+        if ($request->has('customer')) {
+            $whereConditions[] = "s.customer = ?";
+            $params[] = $request->customer;
+        }
+
+        if ($request->has('group_type_desc')) {
+            $whereConditions[] = "s.group_type_desc = ?";
+            $params[] = $request->group_type_desc;
+        }
+
+        $whereClause = implode(' AND ', $whereConditions);
+
+        $sql = "
             SELECT
                 s.product_type,
                 COUNT(DISTINCT s.partno) as sku_count,
@@ -427,39 +760,63 @@ class Dashboard1RevisionController extends ApiController
                     WHEN SUM(s.onhand) > 0 THEN CAST(COUNT(t.shipment) / SUM(s.onhand) AS DECIMAL(10,2))
                     ELSE 0
                 END as turnover_rate
-            FROM stockbywh s
+            FROM {$stockTable} s
             LEFT JOIN inventory_transaction t
                 ON s.partno = t.partno
                 AND s.warehouse = t.warehouse
-                AND $dateFilter
-            WHERE s.warehouse = ?
+                AND {$dateFilter}
+            WHERE {$whereClause}
             GROUP BY s.product_type
             ORDER BY SUM(s.onhand) DESC
-        ", [$warehouse]);
+        ";
+
+        $data = $stockConnection
+            ? DB::connection($stockConnection)->select($sql, $params)
+            : DB::select($sql, $params);
 
         return response()->json([
             'data' => $data,
+            'snapshot_date' => $snapshotDate,
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
                 'days' => $dateRange['days_diff']
-            ]
+            ],
+            'period' => $period
         ]);
     }
 
     /**
      * CHART 7: Stock by Group Type - Donut Chart
      * Groups stock by group_type_desc with warehouse filter
+     * Uses snapshot data for historical view
+     * Optional filters: customer, group_type_desc
      */
     public function stockByGroupType(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
 
-        $data = DB::connection('erp')->table('stockbywh')
-            ->select('group_type_desc')
+        // Use snapshot if available, otherwise use current data
+        $query = $snapshotDate
+            ? StockByWhSnapshot::where('snapshot_date', $snapshotDate)->where('warehouse', $warehouse)
+            : StockByWh::where('warehouse', $warehouse);
+
+        // Apply filters
+        if ($request->has('customer')) {
+            $query->where('customer', $request->customer);
+        }
+
+        if ($request->has('group_type_desc')) {
+            $query->where('group_type_desc', $request->group_type_desc);
+        }
+
+        $data = $query->select('group_type_desc')
             ->selectRaw('SUM(onhand) as total_onhand')
             ->selectRaw('COUNT(DISTINCT partno) as total_items')
-            ->where('warehouse', $warehouse)
+            ->whereNotNull('group_type_desc')
             ->groupBy('group_type_desc')
             ->orderBy('total_onhand', 'desc')
             ->get();
@@ -474,7 +831,62 @@ class Dashboard1RevisionController extends ApiController
                 'total_items' => $totalItems,
                 'total_group_types' => $data->count()
             ],
-            'warehouse' => $warehouse
+            'warehouse' => $warehouse,
+            'snapshot_date' => $snapshotDate,
+            'date_range' => $dateRange,
+            'period' => $period
+        ]);
+    }
+
+    /**
+     * CHART 7B: Stock by Customer - Donut Chart
+     * Groups stock by customer with warehouse filter
+     * Uses snapshot data for historical view
+     * Optional filters: customer, group_type_desc
+     */
+    public function stockByCustomer(Request $request): JsonResponse
+    {
+        $warehouse = $this->getWarehouse($request);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
+
+        // Use snapshot if available, otherwise use current data
+        $query = $snapshotDate
+            ? StockByWhSnapshot::where('snapshot_date', $snapshotDate)->where('warehouse', $warehouse)
+            : StockByWh::where('warehouse', $warehouse);
+
+        // Apply filters
+        if ($request->has('customer')) {
+            $query->where('customer', $request->customer);
+        }
+
+        if ($request->has('group_type_desc')) {
+            $query->where('group_type_desc', $request->group_type_desc);
+        }
+
+        $data = $query->select('customer')
+            ->selectRaw('SUM(onhand) as total_onhand')
+            ->selectRaw('COUNT(DISTINCT partno) as total_items')
+            ->whereNotNull('customer')
+            ->groupBy('customer')
+            ->orderBy('total_onhand', 'desc')
+            ->get();
+
+        $totalOnhand = $data->sum('total_onhand');
+        $totalItems = $data->sum('total_items');
+
+        return response()->json([
+            'data' => $data,
+            'summary' => [
+                'total_onhand' => $totalOnhand,
+                'total_items' => $totalItems,
+                'total_customers' => $data->count()
+            ],
+            'warehouse' => $warehouse,
+            'snapshot_date' => $snapshotDate,
+            'date_range' => $dateRange,
+            'period' => $period
         ]);
     }
 
@@ -486,7 +898,8 @@ class Dashboard1RevisionController extends ApiController
     public function receiptVsShipmentTrend(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 90); // Default 90 days for weekly view
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 90, $period); // Default 90 days for weekly view
 
         $data = DB::connection('erp')->select("
             SELECT
@@ -515,7 +928,8 @@ class Dashboard1RevisionController extends ApiController
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
                 'days' => $dateRange['days_diff']
-            ]
+            ],
+            'period' => $period
         ]);
     }
 
@@ -527,7 +941,8 @@ class Dashboard1RevisionController extends ApiController
     public function transactionTypeDistribution(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 30);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
 
         $data = DB::connection('erp')->select("
             SELECT
@@ -550,7 +965,8 @@ class Dashboard1RevisionController extends ApiController
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to']
-            ]
+            ],
+            'period' => $period
         ]);
     }
 
@@ -558,15 +974,42 @@ class Dashboard1RevisionController extends ApiController
      * CHART 10: Fast vs Slow Moving Items
      * Scatter plot data with quadrant classification
      * DATE FILTER: Applied to transaction frequency analysis
+     * Uses snapshot data for historical stock view
      */
     public function fastVsSlowMoving(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 30);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
 
         $dateFilter = $this->buildDateFilter('t', $dateRange);
 
-        $data = DB::connection('erp')->select("
+        // Use snapshot table if available
+        $stockTable = $snapshotDate ? 'stock_by_wh_snapshots' : 'stockbywh';
+        $stockConnection = $snapshotDate ? null : 'erp';
+
+        $whereConditions = ["s.warehouse = ?"];
+        $params = [$warehouse];
+
+        if ($snapshotDate) {
+            $whereConditions[] = "s.snapshot_date = ?";
+            $params[] = $snapshotDate;
+        }
+
+        if ($request->has('customer')) {
+            $whereConditions[] = "s.customer = ?";
+            $params[] = $request->customer;
+        }
+
+        if ($request->has('group_type_desc')) {
+            $whereConditions[] = "s.group_type_desc = ?";
+            $params[] = $request->group_type_desc;
+        }
+
+        $whereClause = implode(' AND ', $whereConditions);
+
+        $sql = "
             SELECT
                 s.partno,
                 LEFT(s.[desc], 25) as description,
@@ -594,24 +1037,30 @@ class Dashboard1RevisionController extends ApiController
                     WHEN COUNT(t.trans_id) < 5 AND s.onhand < s.safety_stock THEN 'Review'
                     ELSE 'Normal'
                 END as classification
-            FROM stockbywh s
+            FROM {$stockTable} s
             LEFT JOIN inventory_transaction t
                 ON s.partno = t.partno
                 AND s.warehouse = t.warehouse
-                AND $dateFilter
-            WHERE s.warehouse = ?
+                AND {$dateFilter}
+            WHERE {$whereClause}
             GROUP BY s.partno, s.[desc], s.product_type, s.onhand, s.safety_stock, s.min_stock, s.max_stock
             HAVING COUNT(t.trans_id) > 0 OR s.onhand > 0
             ORDER BY COUNT(t.trans_id) DESC
-        ", [$warehouse]);
+        ";
+
+        $data = $stockConnection
+            ? DB::connection($stockConnection)->select($sql, $params)
+            : DB::select($sql, $params);
 
         return response()->json([
             'data' => $data,
+            'snapshot_date' => $snapshotDate,
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
                 'days' => $dateRange['days_diff']
-            ]
+            ],
+            'period' => $period
         ]);
     }
 
@@ -619,14 +1068,43 @@ class Dashboard1RevisionController extends ApiController
      * CHART 11: Stock Turnover Rate (Top 20)
      * Horizontal bar chart with color gradient
      * DATE FILTER: Applied to shipment calculation for turnover
+     * Uses snapshot data for historical stock view
      */
     public function stockTurnoverRate(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
-        $dateRange = $this->getDateRange($request, 30);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
         $days = $dateRange['days_diff'];
 
-        $data = DB::connection('erp')->select("
+        // Use snapshot table if available
+        $stockTable = $snapshotDate ? 'stock_by_wh_snapshots' : 'stockbywh';
+        $stockConnection = $snapshotDate ? null : 'erp';
+
+        $whereConditions = ["s.warehouse = ?"];
+        $params = [$warehouse];
+
+        if ($snapshotDate) {
+            $whereConditions[] = "s.snapshot_date = ?";
+            $params[] = $snapshotDate;
+        }
+
+        if ($request->has('customer')) {
+            $whereConditions[] = "s.customer = ?";
+            $params[] = $request->customer;
+        }
+
+        if ($request->has('group_type_desc')) {
+            $whereConditions[] = "s.group_type_desc = ?";
+            $params[] = $request->group_type_desc;
+        }
+
+        $whereClause = implode(' AND ', $whereConditions);
+
+        $allParams = array_merge([$days, $days, $days, $dateRange['date_from'], $dateRange['date_to']], $params);
+
+        $sql = "
             WITH turnover_calc AS (
                 SELECT
                     s.partno,
@@ -644,13 +1122,13 @@ class Dashboard1RevisionController extends ApiController
                         WHEN SUM(CASE WHEN t.shipment IS NOT NULL AND t.shipment != '' THEN TRY_CAST(ISNULL(t.qty, 0) AS DECIMAL(18,2)) ELSE 0 END) / ? > 0 THEN CAST(s.onhand / (SUM(CASE WHEN t.shipment IS NOT NULL AND t.shipment != '' THEN TRY_CAST(ISNULL(t.qty, 0) AS DECIMAL(18,2)) ELSE 0 END) / ?) AS INT)
                         ELSE 999
                     END as days_of_stock
-                FROM stockbywh s
+                FROM {$stockTable} s
                 LEFT JOIN inventory_transaction t
                     ON s.partno = t.partno
                     AND s.warehouse = t.warehouse
                     AND t.trans_date >= ?
                     AND t.trans_date <= ?
-                WHERE s.warehouse = ?
+                WHERE {$whereClause}
                 GROUP BY s.partno, s.[desc], s.product_type, s.onhand, s.safety_stock
             )
             SELECT TOP 20
@@ -676,20 +1154,21 @@ class Dashboard1RevisionController extends ApiController
             FROM turnover_calc
             WHERE total_shipment > 0
             ORDER BY turnover_rate DESC
-        ", [
-            $days, $days, $days,
-            $dateRange['date_from'],
-            $dateRange['date_to'],
-            $warehouse
-        ]);
+        ";
+
+        $data = $stockConnection
+            ? DB::connection($stockConnection)->select($sql, $allParams)
+            : DB::select($sql, $allParams);
 
         return response()->json([
             'data' => $data,
+            'snapshot_date' => $snapshotDate,
             'date_range' => [
                 'from' => $dateRange['date_from'],
                 'to' => $dateRange['date_to'],
                 'days' => $days
-            ]
+            ],
+            'period' => $period
         ]);
     }
 
@@ -801,6 +1280,7 @@ class Dashboard1RevisionController extends ApiController
             'active_items' => $this->mostActiveItems($request)->getData(true),
             'product_type_analysis' => $this->stockActivityByProductType($request)->getData(true),
             'group_type_analysis' => $this->stockByGroupType($request)->getData(true),
+            'customer_analysis' => $this->stockByCustomer($request)->getData(true),
             'receipt_shipment_trend' => $this->receiptVsShipmentTrend($request)->getData(true),
             'transaction_types' => $this->transactionTypeDistribution($request)->getData(true),
             'fast_slow_moving' => $this->fastVsSlowMoving($request)->getData(true),
@@ -812,11 +1292,15 @@ class Dashboard1RevisionController extends ApiController
 
     /**
      * TABLE: Stock Level Detail
-     * Provides paginated table for stock level monitoring
+     * Provides paginated table grouped by group_type_desc
+     * Uses snapshot data for historical view
      */
     public function stockLevelTable(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
 
         $statusFilter = $request->input('status');
         $search = $request->input('search');
@@ -833,15 +1317,28 @@ class Dashboard1RevisionController extends ApiController
             END
         ";
 
-        $baseQuery = DB::connection('erp')
-            ->table('stockbywh as s')
-            ->where('s.warehouse', $warehouse);
+        // Use snapshot table if available
+        $tableName = $snapshotDate ? 'stock_by_wh_snapshots' : 'stockbywh';
+        $connection = $snapshotDate ? null : 'erp';
+
+        // Build base query with filters
+        $baseQuery = $connection
+            ? DB::connection($connection)->table($tableName . ' as s')
+            : DB::table($tableName . ' as s');
+
+        $baseQuery->where('s.warehouse', $warehouse)
+            ->whereNotNull('s.group_type_desc');
+
+        if ($snapshotDate) {
+            $baseQuery->where('s.snapshot_date', $snapshotDate);
+        }
 
         if ($search) {
             $baseQuery->where(function ($q) use ($search) {
                 $q->where('s.partno', 'LIKE', "%{$search}%")
                     ->orWhere('s.partname', 'LIKE', "%{$search}%")
-                    ->orWhereRaw('s.[desc] LIKE ?', ["%{$search}%"]);
+                    ->orWhereRaw('s.[desc] LIKE ?', ["%{$search}%"])
+                    ->orWhere('s.group_type_desc', 'LIKE', "%{$search}%");
             });
         }
 
@@ -849,21 +1346,33 @@ class Dashboard1RevisionController extends ApiController
             $baseQuery->whereRaw("$statusCase = ?", [$statusFilter]);
         }
 
-        $total = (clone $baseQuery)->count();
+        // Apply filters
+        if ($request->has('customer')) {
+            $baseQuery->where('s.customer', $request->customer);
+        }
 
+        // Get total distinct group_type_desc count
+        $total = (clone $baseQuery)
+            ->distinct()
+            ->count('s.group_type_desc');
+
+        // Get grouped data
         $data = (clone $baseQuery)
             ->selectRaw("
-                s.partno,
-                COALESCE(NULLIF(s.partname, ''), s.[desc]) as part_name,
-                s.unit,
-                s.warehouse,
-                CAST(s.onhand AS DECIMAL(18,2)) as onhand,
-                CAST(s.min_stock AS DECIMAL(18,2)) as min_stock,
-                CAST(s.safety_stock AS DECIMAL(18,2)) as safety_stock,
-                CAST(s.max_stock AS DECIMAL(18,2)) as max_stock,
-                ($statusCase) as status
+                s.group_type_desc,
+                COUNT(DISTINCT s.partno) as total_items,
+                CAST(SUM(s.onhand) AS DECIMAL(18,2)) as total_onhand,
+                CAST(SUM(s.min_stock) AS DECIMAL(18,2)) as total_min_stock,
+                CAST(SUM(s.safety_stock) AS DECIMAL(18,2)) as total_safety_stock,
+                CAST(SUM(s.max_stock) AS DECIMAL(18,2)) as total_max_stock,
+                COUNT(CASE WHEN ($statusCase) = 'Critical' THEN 1 END) as critical_count,
+                COUNT(CASE WHEN ($statusCase) = 'Low' THEN 1 END) as low_count,
+                COUNT(CASE WHEN ($statusCase) = 'Normal' THEN 1 END) as normal_count,
+                COUNT(CASE WHEN ($statusCase) = 'Overstock' THEN 1 END) as overstock_count,
+                CAST(SUM(s.onhand - s.safety_stock) AS DECIMAL(18,2)) as gap_from_safety
             ")
-            ->orderByRaw("(s.safety_stock - s.onhand) DESC")
+            ->groupBy('s.group_type_desc')
+            ->orderBy('s.group_type_desc')
             ->offset($offset)
             ->limit($perPage)
             ->get();
@@ -873,8 +1382,121 @@ class Dashboard1RevisionController extends ApiController
             'filters' => [
                 'warehouse' => $warehouse,
                 'status' => $statusFilter,
-                'search' => $search
+                'search' => $search,
+                'customer' => $request->input('customer')
             ],
+            'snapshot_date' => $snapshotDate,
+            'date_range' => $dateRange,
+            'period' => $period,
+            'pagination' => [
+                'total' => $total,
+                'per_page' => $perPage,
+                'current_page' => $page,
+                'last_page' => $perPage > 0 ? (int) ceil($total / $perPage) : 1,
+                'from' => $total > 0 ? $offset + 1 : 0,
+                'to' => min($offset + $perPage, $total)
+            ]
+        ]);
+    }
+
+    /**
+     * CHART 9: Stock Level by Customer - Table View
+     * Provides paginated table grouped by customer
+     * Uses snapshot data for historical view
+     */
+    public function stockLevelByCustomer(Request $request): JsonResponse
+    {
+        $warehouse = $this->getWarehouse($request);
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $snapshotDate = $this->getSnapshotDate($request, $period);
+
+        $statusFilter = $request->input('status');
+        $search = $request->input('search');
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = min(200, max(10, (int) $request->input('per_page', 50)));
+        $offset = ($page - 1) * $perPage;
+
+        $statusCase = "
+            CASE
+                WHEN s.onhand < s.min_stock THEN 'Critical'
+                WHEN s.onhand < s.safety_stock THEN 'Low'
+                WHEN s.onhand > s.max_stock THEN 'Overstock'
+                ELSE 'Normal'
+            END
+        ";
+
+        // Use snapshot table if available
+        $tableName = $snapshotDate ? 'stock_by_wh_snapshots' : 'stockbywh';
+        $connection = $snapshotDate ? null : 'erp';
+
+        // Build base query with filters
+        $baseQuery = $connection
+            ? DB::connection($connection)->table($tableName . ' as s')
+            : DB::table($tableName . ' as s');
+
+        $baseQuery->where('s.warehouse', $warehouse)
+            ->whereNotNull('s.customer');
+
+        if ($snapshotDate) {
+            $baseQuery->where('s.snapshot_date', $snapshotDate);
+        }
+
+        if ($search) {
+            $baseQuery->where(function ($q) use ($search) {
+                $q->where('s.partno', 'LIKE', "%{$search}%")
+                    ->orWhere('s.partname', 'LIKE', "%{$search}%")
+                    ->orWhereRaw('s.[desc] LIKE ?', ["%{$search}%"])
+                    ->orWhere('s.customer', 'LIKE', "%{$search}%");
+            });
+        }
+
+        if ($statusFilter) {
+            $baseQuery->whereRaw("$statusCase = ?", [$statusFilter]);
+        }
+
+        // Apply filters
+        if ($request->has('group_type_desc')) {
+            $baseQuery->where('s.group_type_desc', $request->group_type_desc);
+        }
+
+        // Get total distinct customer count
+        $total = (clone $baseQuery)
+            ->distinct()
+            ->count('s.customer');
+
+        // Get grouped data
+        $data = (clone $baseQuery)
+            ->selectRaw("
+                s.customer,
+                COUNT(DISTINCT s.partno) as total_items,
+                CAST(SUM(s.onhand) AS DECIMAL(18,2)) as total_onhand,
+                CAST(SUM(s.min_stock) AS DECIMAL(18,2)) as total_min_stock,
+                CAST(SUM(s.safety_stock) AS DECIMAL(18,2)) as total_safety_stock,
+                CAST(SUM(s.max_stock) AS DECIMAL(18,2)) as total_max_stock,
+                COUNT(CASE WHEN ($statusCase) = 'Critical' THEN 1 END) as critical_count,
+                COUNT(CASE WHEN ($statusCase) = 'Low' THEN 1 END) as low_count,
+                COUNT(CASE WHEN ($statusCase) = 'Normal' THEN 1 END) as normal_count,
+                COUNT(CASE WHEN ($statusCase) = 'Overstock' THEN 1 END) as overstock_count,
+                CAST(SUM(s.onhand - s.safety_stock) AS DECIMAL(18,2)) as gap_from_safety
+            ")
+            ->groupBy('s.customer')
+            ->orderBy('s.customer')
+            ->offset($offset)
+            ->limit($perPage)
+            ->get();
+
+        return response()->json([
+            'data' => $data,
+            'filters' => [
+                'warehouse' => $warehouse,
+                'status' => $statusFilter,
+                'search' => $search,
+                'group_type_desc' => $request->input('group_type_desc')
+            ],
+            'snapshot_date' => $snapshotDate,
+            'date_range' => $dateRange,
+            'period' => $period,
             'pagination' => [
                 'total' => $total,
                 'per_page' => $perPage,

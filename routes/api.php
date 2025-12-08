@@ -103,6 +103,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/stock-turnover-rate', [Dashboard1RevisionController::class, 'stockTurnoverRate']);
         Route::get('/recent-transaction-history', [Dashboard1RevisionController::class, 'recentTransactionHistory']);
         Route::get('/stock-level', [Dashboard1RevisionController::class, 'stockLevelTable']);
+        Route::get('/stock-level-by-customer', [Dashboard1RevisionController::class, 'stockLevelByCustomer']);
         Route::get('/all-data', [Dashboard1RevisionController::class, 'getAllData']);
     });
 
@@ -237,6 +238,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/present-attendance-by-shift', [HrDashboardController::class, 'presentAttendanceByShift']);
         Route::get('/top-employees-overtime', [HrDashboardController::class, 'topEmployeesOvertime']);
         Route::get('/top-departments-overtime', [HrDashboardController::class, 'topDepartmentsOvertime']);
+        Route::get('/overtime-per-day', [HrDashboardController::class, 'overtimePerDay']);
         Route::get('/debug', [HrDashboardController::class, 'debug']);
     });
 
@@ -246,5 +248,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/sales-shipment', [SalesAnalyticsController::class, 'getSalesShipmentByPeriod']);
         Route::get('/so-monitor', [SalesAnalyticsController::class, 'getSoMonitorByPeriod']);
         Route::get('/combined-details', [SalesAnalyticsController::class, 'getCombinedDataWithDetails']);
+        Route::get('/delivery-performance', [SalesAnalyticsController::class, 'getDeliveryPerformance']);
+        Route::get('/delivery-performance-by-bp', [SalesAnalyticsController::class, 'getDeliveryPerformanceByBp']);
     });
 });

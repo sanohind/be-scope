@@ -7,10 +7,11 @@ use App\Models\ProdReport;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class Dashboard3Controller extends ApiController
 {
-    private const VALID_DIVISIONS = ['NL', 'CH', 'PS', 'BZ', ' '];
+    private const VALID_DIVISIONS = ['NL', 'CH', 'PS', 'BZ', 'SC'];
 
     /**
      * Normalize and validate divisi filter input.
@@ -78,6 +79,56 @@ class Dashboard3Controller extends ApiController
     }
 
     /**
+     * Generate all periods in the range based on period type
+     *
+     * @param string $period (daily, monthly, yearly)
+     * @param string|null $dateFrom
+     * @param string|null $dateTo
+     * @return array Array of period strings
+     */
+    private function generateAllPeriods(string $period, ?string $dateFrom, ?string $dateTo): array
+    {
+        $periods = [];
+
+        if ($period === 'daily') {
+            // Generate all dates in the month
+            if ($dateFrom) {
+                $startDate = Carbon::parse($dateFrom)->startOfMonth();
+                $endDate = Carbon::parse($dateFrom)->endOfMonth();
+
+                $current = $startDate->copy();
+                while ($current->lte($endDate)) {
+                    $periods[] = $current->format('Y-m-d');
+                    $current->addDay();
+                }
+            }
+        } elseif ($period === 'monthly') {
+            // Generate all months in the year
+            if ($dateFrom) {
+                $year = Carbon::parse($dateFrom)->year;
+                for ($month = 1; $month <= 12; $month++) {
+                    $periods[] = sprintf('%04d-%02d', $year, $month);
+                }
+            }
+        } elseif ($period === 'yearly') {
+            // Generate all years in the range
+            if ($dateFrom && $dateTo) {
+                $startYear = Carbon::parse($dateFrom)->year;
+                $endYear = Carbon::parse($dateTo)->year;
+
+                for ($year = $startYear; $year <= $endYear; $year++) {
+                    $periods[] = (string) $year;
+                }
+            } elseif ($dateFrom) {
+                $year = Carbon::parse($dateFrom)->year;
+                $periods[] = (string) $year;
+            }
+        }
+
+        return $periods;
+    }
+
+    /**
      * Chart 3.1: Production KPI Summary - KPI Cards
      *
      * Query Parameters:
@@ -99,8 +150,10 @@ class Dashboard3Controller extends ApiController
         $totalQtyDelivered = (clone $query)->sum('qty_delivery');
         $totalOutstandingQty = (clone $query)->sum('qty_os');
 
-        $completionRate = $totalQtyOrdered > 0
-            ? round(($totalQtyDelivered / $totalQtyOrdered) * 100, 2)
+        $qty_order = (clone $query)->avg('qty_order');
+        $qty_delivery = (clone $query)->avg('qty_delivery');
+        $avgCompletionRate = $qty_order > 0
+            ? round(($qty_delivery / $qty_order) * 100, 2)
             : 0;
 
         return response()->json([
@@ -108,7 +161,7 @@ class Dashboard3Controller extends ApiController
             'total_qty_ordered' => $totalQtyOrdered,
             'total_qty_delivered' => $totalQtyDelivered,
             'total_outstanding_qty' => $totalOutstandingQty,
-            'completion_rate' => $completionRate,
+            'completion_rate' => $avgCompletionRate,
             'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date'),
             'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
@@ -445,10 +498,55 @@ class Dashboard3Controller extends ApiController
             ->selectRaw('SUM(qty_pelaporan) as qty_pelaporan')
             ->groupByRaw($dateFormat)
             ->orderByRaw($dateFormat)
-            ->get();
+            ->get()
+            ->map(function ($item) use ($period) {
+                // Normalize period format
+                $periodValue = trim((string) $item->period);
+
+                // For daily period, ensure format is Y-m-d
+                if ($period === 'daily' && preg_match('/^\d{4}-\d{2}-\d{2}/', $periodValue)) {
+                    // Already in correct format
+                } elseif ($period === 'daily') {
+                    // Try to parse and reformat
+                    try {
+                        $periodValue = Carbon::parse($periodValue)->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                }
+
+                // Ensure qty_pelaporan is formatted as string with 2 decimals
+                $qty = is_numeric($item->qty_pelaporan)
+                    ? number_format((float) $item->qty_pelaporan, 2, '.', '')
+                    : '0.00';
+                return [
+                    'period' => $periodValue,
+                    'qty_pelaporan' => $qty
+                ];
+            })
+            ->keyBy('period');
+
+        // Generate all periods in range and fill missing ones with 0
+        $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+
+        // If no periods generated (no dateFrom), return data as is
+        if (empty($allPeriods)) {
+            $filledData = $data->values();
+        } else {
+            $filledData = collect($allPeriods)->map(function ($periodValue) use ($data) {
+                $periodKey = (string) $periodValue;
+                if ($data->has($periodKey)) {
+                    return $data->get($periodKey);
+                }
+                return [
+                    'period' => $periodKey,
+                    'qty_pelaporan' => '0.00'
+                ];
+            })->values();
+        }
 
         return response()->json([
-            'data' => $data,
+            'data' => $filledData,
             'filter_metadata' => $this->getPeriodMetadata($request, 'trans_date'),
             'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);

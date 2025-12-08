@@ -357,4 +357,279 @@ class SalesAnalyticsController extends ApiController
             ], 500);
         }
     }
+
+    /**
+     * Get delivery performance chart data
+     * Performance = (total_delivery / total_po) * 100
+     * 
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function getDeliveryPerformance(Request $request): JsonResponse
+    {
+        try {
+            // Validate input parameters
+            $year = $request->input('year');
+            $period = $request->input('period');
+
+            // Get sales shipment data (delivery)
+            $salesShipmentQuery = DB::connection('erp')->table('so_invoice_line')
+                ->select(
+                    DB::raw('YEAR(delivery_date) as year'),
+                    DB::raw('MONTH(delivery_date) as period'),
+                    DB::raw('SUM(delivered_qty) as total_delivery'),
+                    DB::raw('0 as total_po')
+                );
+
+            if ($year) {
+                $salesShipmentQuery->whereRaw('YEAR(delivery_date) = ?', [$year]);
+            }
+
+            if ($period) {
+                $salesShipmentQuery->whereRaw('MONTH(delivery_date) = ?', [$period]);
+            }
+
+            $salesShipmentQuery->groupBy(
+                DB::raw('YEAR(delivery_date)'),
+                DB::raw('MONTH(delivery_date)')
+            );
+
+            // Get SO monitor data (PO)
+            $soMonitorQuery = DB::connection('erp')->table('so_monitor')
+                ->select(
+                    DB::raw('YEAR(planned_delivery_date) as year'),
+                    DB::raw('MONTH(planned_delivery_date) as period'),
+                    DB::raw('0 as total_delivery'),
+                    DB::raw('SUM(order_qty) as total_po')
+                )
+                ->where('sequence', 0);
+
+            if ($year) {
+                $soMonitorQuery->whereRaw('YEAR(planned_delivery_date) = ?', [$year]);
+            }
+
+            if ($period) {
+                $soMonitorQuery->whereRaw('MONTH(planned_delivery_date) = ?', [$period]);
+            }
+
+            $soMonitorQuery->groupBy(
+                DB::raw('YEAR(planned_delivery_date)'),
+                DB::raw('MONTH(planned_delivery_date)')
+            );
+
+            // Get data from both queries
+            $salesShipmentData = $salesShipmentQuery->get();
+            $soMonitorData = $soMonitorQuery->get();
+
+            // Merge data and calculate performance
+            $mergedData = [];
+            
+            foreach ($salesShipmentData as $row) {
+                $key = $row->year . '-' . $row->period;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                        'performance' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_delivery'] += (float)$row->total_delivery;
+            }
+
+            foreach ($soMonitorData as $row) {
+                $key = $row->year . '-' . $row->period;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                        'performance' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_po'] += (float)$row->total_po;
+            }
+
+            // Calculate performance percentage for each period
+            foreach ($mergedData as &$data) {
+                if ($data['total_po'] > 0) {
+                    $data['performance'] = round(($data['total_delivery'] / $data['total_po']) * 100, 2);
+                } else {
+                    $data['performance'] = 0;
+                }
+            }
+
+            // Reset array keys and sort
+            $result = array_values($mergedData);
+            usort($result, function ($a, $b) {
+                if ($a['year'] !== $b['year']) {
+                    return $a['year'] - $b['year'];
+                }
+                return $a['period'] - $b['period'];
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $result,
+                'count' => count($result),
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch delivery performance data',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get delivery performance with business partner details
+     * Performance = (total_delivery / total_po) * 100
+     * 
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function getDeliveryPerformanceByBp(Request $request): JsonResponse
+    {
+        try {
+            $year = $request->input('year');
+            $period = $request->input('period');
+
+            // Get sales shipment details
+            $salesShipmentQuery = DB::connection('erp')->table('so_invoice_line')
+                ->select(
+                    DB::raw('YEAR(delivery_date) as year'),
+                    DB::raw('MONTH(delivery_date) as period'),
+                    'bp_code',
+                    'bp_name',
+                    DB::raw('SUM(delivered_qty) as total_delivery'),
+                    DB::raw('0 as total_po')
+                );
+
+            if ($year) {
+                $salesShipmentQuery->whereRaw('YEAR(delivery_date) = ?', [$year]);
+            }
+
+            if ($period) {
+                $salesShipmentQuery->whereRaw('MONTH(delivery_date) = ?', [$period]);
+            }
+
+            $salesShipmentQuery->groupBy(
+                DB::raw('YEAR(delivery_date)'),
+                DB::raw('MONTH(delivery_date)'),
+                'bp_code',
+                'bp_name'
+            );
+
+            // Get SO monitor details
+            $soMonitorQuery = DB::connection('erp')->table('so_monitor')
+                ->select(
+                    DB::raw('YEAR(planned_delivery_date) as year'),
+                    DB::raw('MONTH(planned_delivery_date) as period'),
+                    'bp_code',
+                    'bp_name',
+                    DB::raw('0 as total_delivery'),
+                    DB::raw('SUM(order_qty) as total_po')
+                )
+                ->where('sequence', 0);
+
+            if ($year) {
+                $soMonitorQuery->whereRaw('YEAR(planned_delivery_date) = ?', [$year]);
+            }
+
+            if ($period) {
+                $soMonitorQuery->whereRaw('MONTH(planned_delivery_date) = ?', [$period]);
+            }
+
+            $soMonitorQuery->groupBy(
+                DB::raw('YEAR(planned_delivery_date)'),
+                DB::raw('MONTH(planned_delivery_date)'),
+                'bp_code',
+                'bp_name'
+            );
+
+            // Get data from both queries
+            $salesShipmentData = $salesShipmentQuery->get();
+            $soMonitorData = $soMonitorQuery->get();
+
+            // Merge data and calculate performance
+            $mergedData = [];
+            
+            foreach ($salesShipmentData as $row) {
+                $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'bp_code' => $row->bp_code,
+                        'bp_name' => $row->bp_name,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                        'performance' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_delivery'] += (float)$row->total_delivery;
+            }
+
+            foreach ($soMonitorData as $row) {
+                $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
+                
+                if (!isset($mergedData[$key])) {
+                    $mergedData[$key] = [
+                        'year' => $row->year,
+                        'period' => $row->period,
+                        'bp_code' => $row->bp_code,
+                        'bp_name' => $row->bp_name,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                        'performance' => 0,
+                    ];
+                }
+
+                $mergedData[$key]['total_po'] += (float)$row->total_po;
+            }
+
+            // Calculate performance percentage for each business partner
+            foreach ($mergedData as &$data) {
+                if ($data['total_po'] > 0) {
+                    $data['performance'] = round(($data['total_delivery'] / $data['total_po']) * 100, 2);
+                } else {
+                    $data['performance'] = 0;
+                }
+            }
+
+            $result = array_values($mergedData);
+            usort($result, function ($a, $b) {
+                if ($a['year'] !== $b['year']) {
+                    return $a['year'] - $b['year'];
+                }
+                if ($a['period'] !== $b['period']) {
+                    return $a['period'] - $b['period'];
+                }
+                return strcmp($a['bp_code'], $b['bp_code']);
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $result,
+                'count' => count($result),
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch delivery performance by BP data',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
 }

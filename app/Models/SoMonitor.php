@@ -14,12 +14,12 @@ class SoMonitor extends Model
         'period',
         'bp_code',
         'bp_name',
-        'total_po',
+        'order_qty',
     ];
 
     protected $casts = [
         'year' => 'integer',
         'period' => 'integer',
-        'total_po' => 'decimal:2',
+        'order_qty' => 'decimal:2',
     ];
 }

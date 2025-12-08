@@ -821,6 +821,35 @@ class HrDashboardController extends ApiController
                 return ($item['attendCode'] ?? null) === 'PRS';
             });
 
+            // Get all unique shift codes from the data
+            $allShiftCodes = [];
+            foreach ($allData as $item) {
+                $shiftCode = $item['shiftdailyCode'] ?? 'UNKNOWN';
+                if (!in_array($shiftCode, $allShiftCodes)) {
+                    $allShiftCodes[] = $shiftCode;
+                }
+            }
+
+            // Generate all periods in the range
+            $allPeriods = [];
+            if ($period === 'daily') {
+                $startDateObj = Carbon::createFromFormat('Y-m-d', $startDate);
+                $endDateObj = Carbon::createFromFormat('Y-m-d', $endDate);
+                $currentDate = $startDateObj->copy();
+                while ($currentDate->lte($endDateObj)) {
+                    $allPeriods[] = $currentDate->format('Y-m-d');
+                    $currentDate->addDay();
+                }
+            } else {
+                $startDateObj = Carbon::createFromFormat('Y-m-d', $startDate);
+                $endDateObj = Carbon::createFromFormat('Y-m-d', $endDate);
+                $currentDate = $startDateObj->copy()->startOfMonth();
+                while ($currentDate->lte($endDateObj)) {
+                    $allPeriods[] = $currentDate->format('Y-m');
+                    $currentDate->addMonth();
+                }
+            }
+
             // Group by shiftdailyCode and period
             $groupedData = [];
 
@@ -850,6 +879,20 @@ class HrDashboardController extends ApiController
                 $groupedData[$groupKey]['count']++;
             }
 
+            // Add missing periods with count 0
+            foreach ($allShiftCodes as $shiftCode) {
+                foreach ($allPeriods as $periodValue) {
+                    $groupKey = $shiftCode . '|' . $periodValue;
+                    if (!isset($groupedData[$groupKey])) {
+                        $groupedData[$groupKey] = [
+                            'shiftdailyCode' => $shiftCode,
+                            'period' => $periodValue,
+                            'count' => 0,
+                        ];
+                    }
+                }
+            }
+
             // Convert to array and sort
             $data = array_values($groupedData);
             usort($data, function ($a, $b) {
@@ -874,6 +917,130 @@ class HrDashboardController extends ApiController
         } catch (\Exception $e) {
             Log::error('HR API Present Attendance By Shift Error: ' . $e->getMessage());
             return $this->sendError('Failed to get present attendance by shift: ' . $e->getMessage(), [], 500);
+        }
+    }
+
+    /**
+     * Overtime Per Day
+     * GET /api/dashboard/hr/overtime-per-day
+     *
+     * Returns total overtime per day in hours (converted from minutes)
+     * Supports filtering: month, year OR startDate, endDate
+     *
+     * Query Parameters:
+     * - month: Month (1-12, default: current month)
+     * - year: Year (default: current year)
+     * - startDate: Start date (format: YYYY-MM-DD) - overrides month/year if provided
+     * - endDate: End date (format: YYYY-MM-DD) - overrides month/year if provided
+     */
+    public function overtimePerDay(Request $request): JsonResponse
+    {
+        try {
+            $startDate = $request->get('startDate');
+            $endDate = $request->get('endDate');
+
+            // If startDate and endDate are not provided, use month and year
+            if (!$startDate || !$endDate) {
+                $month = $request->get('month', now()->month);
+                $year = $request->get('year', now()->year);
+
+                // Validate month
+                if ($month < 1 || $month > 12) {
+                    $month = now()->month;
+                }
+
+                // Validate year
+                if ($year < 2000 || $year > 2100) {
+                    $year = now()->year;
+                }
+
+                // Build date range for the selected month
+                $startDateObj = Carbon::create($year, $month, 1)->startOfMonth();
+                $endDateObj = $startDateObj->copy()->endOfMonth();
+
+                $startDate = $startDateObj->format('Y-m-d');
+                $endDate = $endDateObj->format('Y-m-d');
+            }
+
+            // Query: Get total overtime per day
+            $overtimeData = AttendanceByPeriod::query()
+                ->select(
+                    DB::raw("DATE(attendance_by_period.starttime) as date"),
+                    DB::raw('SUM(COALESCE(attendance_by_period.total_ot, 0)) as total_ot_minutes')
+                )
+                ->where(function($query) use ($startDate, $endDate) {
+                    $query->whereBetween('attendance_by_period.starttime', [
+                        $startDate . ' 00:00:00',
+                        $endDate . ' 23:59:59'
+                    ])
+                    ->orWhereBetween('attendance_by_period.shiftstarttime', [
+                        $startDate . ' 00:00:00',
+                        $endDate . ' 23:59:59'
+                    ]);
+                })
+                ->groupBy(DB::raw("DATE(attendance_by_period.starttime)"))
+                ->orderBy(DB::raw("DATE(attendance_by_period.starttime)"), 'asc')
+                ->get();
+
+            // Create a map of existing dates with overtime data
+            $overtimeMap = [];
+            foreach ($overtimeData as $item) {
+                $overtimeMap[$item->date] = (float)$item->total_ot_minutes;
+            }
+
+            // Generate all dates in the range
+            $startDateObj = Carbon::createFromFormat('Y-m-d', $startDate);
+            $endDateObj = Carbon::createFromFormat('Y-m-d', $endDate);
+            $allDates = [];
+            $currentDate = $startDateObj->copy();
+
+            while ($currentDate->lte($endDateObj)) {
+                $dateStr = $currentDate->format('Y-m-d');
+                $totalMinutes = $overtimeMap[$dateStr] ?? 0;
+                $hours = intdiv((int)$totalMinutes, 60);
+                $minutes = (int)$totalMinutes % 60;
+
+                $allDates[] = [
+                    'date' => $dateStr,
+                    'total_ot_minutes' => $totalMinutes,
+                    'total_ot_hours' => $hours,
+                    'total_ot_minutes_remainder' => $minutes,
+                    'total_ot_formatted' => $hours . ' jam ' . ($minutes > 0 ? $minutes . ' menit' : ''),
+                ];
+
+                $currentDate->addDay();
+            }
+
+            // Calculate total overtime for the period
+            $totalMinutes = array_sum(array_values($overtimeMap));
+            $totalHours = intdiv((int)$totalMinutes, 60);
+            $totalMinutesRemainder = (int)$totalMinutes % 60;
+
+            // Get month and year for metadata
+            $startDateObj = Carbon::createFromFormat('Y-m-d', $startDate);
+            $month = $startDateObj->month;
+            $year = $startDateObj->year;
+
+            return $this->sendResponse([
+                'data' => $allDates,
+                'total_records' => count($allDates),
+                'total_ot_minutes' => $totalMinutes,
+                'total_ot_hours' => $totalHours,
+                'total_ot_minutes_remainder' => $totalMinutesRemainder,
+                'total_ot_formatted' => $totalHours . ' jam ' . ($totalMinutesRemainder > 0 ? $totalMinutesRemainder . ' menit' : ''),
+                'filter_metadata' => [
+                    'month' => (int)$month,
+                    'year' => (int)$year,
+                    'month_name' => $startDateObj->format('F'),
+                    'start_date' => $startDate,
+                    'end_date' => $endDate,
+                ],
+            ], 'Overtime per day retrieved successfully');
+        } catch (\Exception $e) {
+            Log::error('HR API Overtime Per Day Error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->sendError('Failed to get overtime per day: ' . $e->getMessage(), [], 500);
         }
     }
 
@@ -911,7 +1078,7 @@ class HrDashboardController extends ApiController
                 $endDate = now();
             }
 
-            // Query: Get top 15 employees by total overtime index
+            // Query: Get top 15 employees by total overtime (in minutes)
             // Use COALESCE to handle NULL values and sum only non-null values
             $topEmployees = AttendanceByPeriod::query()
                 ->select(
@@ -920,12 +1087,12 @@ class HrDashboardController extends ApiController
                     'employee_master.emp_no',
                     'employee_master.costcenter_name',
                     'employee_master.dept_name_en',
-                    DB::raw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) as total_overtime_index')
+                    DB::raw('SUM(COALESCE(attendance_by_period.total_ot, 0)) as total_overtime_minutes')
                 )
                 ->join('employee_master', 'attendance_by_period.emp_id', '=', 'employee_master.emp_id')
                 ->where(function($query) {
-                    $query->whereNotNull('attendance_by_period.total_otindex')
-                          ->orWhere('attendance_by_period.total_otindex', '!=', 0);
+                    $query->whereNotNull('attendance_by_period.total_ot')
+                          ->orWhere('attendance_by_period.total_ot', '!=', 0);
                 })
                 ->where(function($query) use ($startDate, $endDate) {
                     $query->whereBetween('attendance_by_period.starttime', [
@@ -944,13 +1111,17 @@ class HrDashboardController extends ApiController
                     'employee_master.costcenter_name',
                     'employee_master.dept_name_en'
                 )
-                ->havingRaw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) > 0')
-                ->orderByDesc('total_overtime_index')
+                ->havingRaw('SUM(COALESCE(attendance_by_period.total_ot, 0)) > 0')
+                ->orderByDesc('total_overtime_minutes')
                 ->limit(15)
                 ->get();
 
-            // Format response
+            // Format response: convert minutes to hours
             $data = $topEmployees->map(function ($employee, $index) {
+                $totalMinutes = (float)$employee->total_overtime_minutes;
+                $hours = intdiv((int)$totalMinutes, 60);
+                $minutes = (int)$totalMinutes % 60;
+
                 return [
                     'rank' => $index + 1,
                     'emp_id' => $employee->emp_id,
@@ -958,7 +1129,9 @@ class HrDashboardController extends ApiController
                     'full_name' => $employee->full_name,
                     'department' => $employee->dept_name_en,
                     'cost_center' => $employee->costcenter_name,
-                    'total_overtime_index' => round((float)$employee->total_overtime_index, 2),
+                    'total_overtime_index' => $hours,
+                    'total_overtime_index_minutes' => $minutes,
+                    'total_overtime_index_formatted' => $hours . ' jam ' . ($minutes > 0 ? $minutes . ' menit' : ''),
                 ];
             });
 
@@ -1015,19 +1188,19 @@ class HrDashboardController extends ApiController
                 $endDate = now();
             }
 
-            // Query: Get top 10 departments by total overtime index
+            // Query: Get top 10 departments by total overtime (in minutes)
             // Use COALESCE to handle NULL values and sum only non-null values
             $topDepartments = AttendanceByPeriod::query()
                 ->select(
                     'employee_master.costcenter_name',
                     'employee_master.dept_name_en',
-                    DB::raw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) as total_overtime_index'),
+                    DB::raw('SUM(COALESCE(attendance_by_period.total_ot, 0)) as total_overtime_minutes'),
                     DB::raw('COUNT(DISTINCT attendance_by_period.emp_id) as total_employees')
                 )
                 ->join('employee_master', 'attendance_by_period.emp_id', '=', 'employee_master.emp_id')
                 ->where(function($query) {
-                    $query->whereNotNull('attendance_by_period.total_otindex')
-                          ->orWhere('attendance_by_period.total_otindex', '!=', 0);
+                    $query->whereNotNull('attendance_by_period.total_ot')
+                          ->orWhere('attendance_by_period.total_ot', '!=', 0);
                 })
                 ->whereNotNull('employee_master.costcenter_name')
                 ->where(function($query) use ($startDate, $endDate) {
@@ -1044,18 +1217,24 @@ class HrDashboardController extends ApiController
                     'employee_master.costcenter_name',
                     'employee_master.dept_name_en'
                 )
-                ->havingRaw('SUM(COALESCE(attendance_by_period.total_otindex, 0)) > 0')
-                ->orderByDesc('total_overtime_index')
+                ->havingRaw('SUM(COALESCE(attendance_by_period.total_ot, 0)) > 0')
+                ->orderByDesc('total_overtime_minutes')
                 ->limit(10)
                 ->get();
 
-            // Format response
+            // Format response: convert minutes to hours
             $data = $topDepartments->map(function ($department, $index) {
+                $totalMinutes = (float)$department->total_overtime_minutes;
+                $hours = intdiv((int)$totalMinutes, 60);
+                $minutes = (int)$totalMinutes % 60;
+
                 return [
                     'rank' => $index + 1,
                     'department' => $department->dept_name_en,
                     'cost_center' => $department->costcenter_name,
-                    'total_overtime_index' => round((float)$department->total_overtime_index, 2),
+                    'total_overtime_index' => $hours,
+                    'total_overtime_index_minutes' => $minutes,
+                    'total_overtime_index_formatted' => $hours . ' jam ' . ($minutes > 0 ? $minutes . ' menit' : ''),
                     'total_employees' => (int)$department->total_employees,
                 ];
             });
