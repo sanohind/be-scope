@@ -103,7 +103,7 @@ class Dashboard2RevisionController extends ApiController
     /**
      * Generate all periods in the range based on period type
      */
-    private function generateAllPeriods(string $period, string $dateFrom, string $dateTo): array
+    protected function generateAllPeriods(string $period, ?string $dateFrom, ?string $dateTo): array
     {
         $periods = [];
         $start = Carbon::parse($dateFrom);
@@ -152,7 +152,7 @@ class Dashboard2RevisionController extends ApiController
     /**
      * Fill missing periods with zero values
      */
-    private function fillMissingPeriods(array $data, array $allPeriods, string $period, string $periodKey = 'period_date'): array
+    protected function fillMissingPeriods($data, array $allPeriods, string $periodKey = 'period', ?callable $zeroValueCallback = null): array
     {
         if (empty($data)) {
             // If no data, create zero entries for all periods
@@ -172,7 +172,7 @@ class Dashboard2RevisionController extends ApiController
         foreach ($data as $item) {
             $key = is_object($item) ? $item->{$periodKey} : $item[$periodKey];
             // Normalize key format
-            $key = $this->normalizePeriodKey($key, $period);
+            $key = trim((string) $key);
             $dataByPeriod[$key] = $item;
         }
 
@@ -182,71 +182,50 @@ class Dashboard2RevisionController extends ApiController
         // Fill missing periods
         $filledData = [];
         foreach ($allPeriods as $periodValue) {
-            if (isset($dataByPeriod[$periodValue])) {
-                $item = $dataByPeriod[$periodValue];
-                // Ensure period_date is normalized
+            $periodValueStr = trim((string) $periodValue);
+            if (isset($dataByPeriod[$periodValueStr])) {
+                $item = $dataByPeriod[$periodValueStr];
+                // Ensure period key is normalized
                 if (is_object($item)) {
-                    $item->{$periodKey} = $periodValue;
+                    $item->{$periodKey} = $periodValueStr;
                 } else {
-                    $item[$periodKey] = $periodValue;
+                    $item[$periodKey] = $periodValueStr;
                 }
                 $filledData[] = $item;
             } else {
-                // Create zero value entry based on sample structure
-                $zeroEntry = is_object($sampleItem) ? (object)[] : [];
+                // Create zero value entry based on sample structure or callback
+                if ($zeroValueCallback) {
+                    $filledData[] = $zeroValueCallback($periodValue);
+                } else {
+                    $zeroEntry = is_object($sampleItem) ? (object)[] : [];
 
-                foreach (get_object_vars($sampleItem) as $field => $value) {
-                    if ($field === $periodKey) {
-                        if (is_object($zeroEntry)) {
-                            $zeroEntry->{$field} = $periodValue;
+                    foreach (get_object_vars($sampleItem) as $field => $value) {
+                        if ($field === $periodKey) {
+                            if (is_object($zeroEntry)) {
+                                $zeroEntry->{$field} = $periodValueStr;
+                            } else {
+                                $zeroEntry[$field] = $periodValueStr;
+                            }
+                        } elseif (is_numeric($value)) {
+                            if (is_object($zeroEntry)) {
+                                $zeroEntry->{$field} = 0;
+                            } else {
+                                $zeroEntry[$field] = 0;
+                            }
                         } else {
-                            $zeroEntry[$field] = $periodValue;
-                        }
-                    } elseif (is_numeric($value)) {
-                        if (is_object($zeroEntry)) {
-                            $zeroEntry->{$field} = 0;
-                        } else {
-                            $zeroEntry[$field] = 0;
-                        }
-                    } else {
-                        if (is_object($zeroEntry)) {
-                            $zeroEntry->{$field} = $value ?? null;
-                        } else {
-                            $zeroEntry[$field] = $value ?? null;
+                            if (is_object($zeroEntry)) {
+                                $zeroEntry->{$field} = $value ?? null;
+                            } else {
+                                $zeroEntry[$field] = $value ?? null;
+                            }
                         }
                     }
+                    $filledData[] = $zeroEntry;
                 }
-                $filledData[] = $zeroEntry;
             }
         }
 
         return $filledData;
-    }
-
-    /**
-     * Normalize period key format
-     */
-    private function normalizePeriodKey(string $key, string $period): string
-    {
-        $key = trim($key);
-
-        if ($period === 'daily') {
-            try {
-                return Carbon::parse($key)->format('Y-m-d');
-            } catch (\Exception $e) {
-                return $key;
-            }
-        } elseif ($period === 'monthly') {
-            try {
-                return Carbon::parse($key)->format('Y-m');
-            } catch (\Exception $e) {
-                return $key;
-            }
-        } elseif ($period === 'yearly') {
-            return (string) intval($key);
-        }
-
-        return $key;
     }
 
     /**
@@ -440,7 +419,7 @@ class Dashboard2RevisionController extends ApiController
 
         // Generate all periods and fill missing ones
         $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
-        $filledData = $this->fillMissingPeriods($data, $allPeriods, $period, 'period_date');
+        $filledData = $this->fillMissingPeriods($data, $allPeriods, 'period_date');
 
         return response()->json([
             'data' => $filledData,
