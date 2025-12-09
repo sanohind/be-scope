@@ -226,10 +226,68 @@ class Dashboard6Controller extends ApiController
                 ->selectRaw('SUM(qty_order) as production_plan')
                 ->groupByRaw($dateFormat)
                 ->orderByRaw($dateFormat)
-                ->get();
+                ->get()
+                ->map(function ($item) use ($period) {
+                    // Normalize period format
+                    $rawPeriod = $item->period ?? '';
+                    $periodKey = trim((string) $rawPeriod);
+
+                    if ($period === 'daily') {
+                        try {
+                            $periodKey = \Carbon\Carbon::parse($periodKey)->format('Y-m-d');
+                        } catch (\Exception $e) {
+                            // Keep original if parsing fails
+                        }
+                    } elseif ($period === 'monthly') {
+                        if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                            $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                        } else {
+                            try {
+                                $parsed = \Carbon\Carbon::parse($periodKey);
+                                $periodKey = $parsed->format('Y-m');
+                            } catch (\Exception $e) {
+                                // Keep original if parsing fails
+                            }
+                        }
+                    } elseif ($period === 'yearly') {
+                        if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                            $periodKey = (string) intval($matches[1]);
+                        } else {
+                            $periodKey = (string) intval($periodKey);
+                        }
+                    }
+
+                    return (object) [
+                        'period' => $periodKey,
+                        'production_plan' => $item->production_plan ?? 0,
+                    ];
+                })
+                ->keyBy('period');
+
+            // Generate all periods in range
+            $dateFrom = $request->get('date_from');
+            $dateTo = $request->get('date_to');
+            $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+
+            // Fill missing periods with zero values
+            $filledData = collect($allPeriods)->map(function ($periodValue) use ($data) {
+                $existing = $data->get($periodValue);
+
+                if ($existing) {
+                    return [
+                        'period' => $periodValue,
+                        'production_plan' => $existing->production_plan ?? 0,
+                    ];
+                } else {
+                    return [
+                        'period' => $periodValue,
+                        'production_plan' => 0,
+                    ];
+                }
+            })->values();
 
             return response()->json([
-                'data' => $data,
+                'data' => $filledData,
                 'filter_metadata' => $this->getPeriodMetadata($request, 'planning_date')
             ]);
         }
@@ -426,31 +484,126 @@ class Dashboard6Controller extends ApiController
             ->get()
             ->keyBy('period');
 
-        // Merge all periods
-        $allPeriods = collect($procurementTrend->keys())
-            ->merge($productionTrend->keys())
-            ->merge($deliveryTrend->keys())
-            ->unique()
-            ->sort()
-            ->values();
+        // Normalize period keys
+        $procurementTrend = $procurementTrend->mapWithKeys(function ($item) use ($period) {
+            $rawPeriod = $item->period ?? '';
+            $periodKey = trim((string) $rawPeriod);
 
-        $data = $allPeriods->map(function ($period) use ($procurementTrend, $productionTrend, $deliveryTrend) {
-            $procurement = $procurementTrend->get($period);
-            $production = $productionTrend->get($period);
-            $delivery = $deliveryTrend->get($period);
+            if ($period === 'daily') {
+                try {
+                    $periodKey = \Carbon\Carbon::parse($periodKey)->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // Keep original if parsing fails
+                }
+            } elseif ($period === 'monthly') {
+                if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                    $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                } else {
+                    try {
+                        $parsed = \Carbon\Carbon::parse($periodKey);
+                        $periodKey = $parsed->format('Y-m');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                }
+            } elseif ($period === 'yearly') {
+                if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                    $periodKey = (string) intval($matches[1]);
+                } else {
+                    $periodKey = (string) intval($periodKey);
+                }
+            }
 
-            $procurementTime = $procurement->procurement_cycle_time ?? 0;
-            $productionTime = $production->production_cycle_time ?? 0;
-            $deliveryTime = $delivery->delivery_cycle_time ?? 0;
+            return [$periodKey => $item];
+        });
+
+        $productionTrend = $productionTrend->mapWithKeys(function ($item) use ($period) {
+            $rawPeriod = $item->period ?? '';
+            $periodKey = trim((string) $rawPeriod);
+
+            if ($period === 'daily') {
+                try {
+                    $periodKey = \Carbon\Carbon::parse($periodKey)->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // Keep original if parsing fails
+                }
+            } elseif ($period === 'monthly') {
+                if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                    $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                } else {
+                    try {
+                        $parsed = \Carbon\Carbon::parse($periodKey);
+                        $periodKey = $parsed->format('Y-m');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                }
+            } elseif ($period === 'yearly') {
+                if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                    $periodKey = (string) intval($matches[1]);
+                } else {
+                    $periodKey = (string) intval($periodKey);
+                }
+            }
+
+            return [$periodKey => $item];
+        });
+
+        $deliveryTrend = $deliveryTrend->mapWithKeys(function ($item) use ($period) {
+            $rawPeriod = $item->period ?? '';
+            $periodKey = trim((string) $rawPeriod);
+
+            if ($period === 'daily') {
+                try {
+                    $periodKey = \Carbon\Carbon::parse($periodKey)->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // Keep original if parsing fails
+                }
+            } elseif ($period === 'monthly') {
+                if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                    $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                } else {
+                    try {
+                        $parsed = \Carbon\Carbon::parse($periodKey);
+                        $periodKey = $parsed->format('Y-m');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                }
+            } elseif ($period === 'yearly') {
+                if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                    $periodKey = (string) intval($matches[1]);
+                } else {
+                    $periodKey = (string) intval($periodKey);
+                }
+            }
+
+            return [$periodKey => $item];
+        });
+
+        // Generate all periods in range
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+
+        // Fill missing periods with zero values
+        $data = collect($allPeriods)->map(function ($periodValue) use ($procurementTrend, $productionTrend, $deliveryTrend) {
+            $procurement = $procurementTrend->get($periodValue);
+            $production = $productionTrend->get($periodValue);
+            $delivery = $deliveryTrend->get($periodValue);
+
+            $procurementTime = $procurement ? ($procurement->procurement_cycle_time ?? 0) : 0;
+            $productionTime = $production ? ($production->production_cycle_time ?? 0) : 0;
+            $deliveryTime = $delivery ? ($delivery->delivery_cycle_time ?? 0) : 0;
 
             return [
-                'period' => $period,
+                'period' => $periodValue,
                 'procurement_cycle_time' => round($procurementTime, 2),
                 'production_cycle_time' => round($productionTime, 2),
                 'delivery_cycle_time' => round($deliveryTime, 2),
                 'total_order_to_cash_cycle_time' => round($procurementTime + $productionTime + $deliveryTime, 2)
             ];
-        });
+        })->values();
 
         return response()->json([
             'data' => $data,
@@ -644,19 +797,124 @@ class Dashboard6Controller extends ApiController
             ->groupByRaw($dateFormat)
             ->orderByRaw($dateFormat)
             ->get()
-            ->map(function ($item) {
-                return [
-                    'period' => $item->period,
-                    'total_shipment' => (int) $item->total_shipment,
-                    'approved_count' => (int) $item->approved_count,
-                    'released_count' => (int) $item->released_count,
-                    'invoiced_count' => (int) $item->invoiced_count,
-                    'processed_count' => (int) $item->processed_count
+            ->map(function ($item) use ($period) {
+                // Normalize period format
+                $rawPeriod = $item->period ?? '';
+                $periodKey = trim((string) $rawPeriod);
+
+                if ($period === 'daily') {
+                    try {
+                        $periodKey = \Carbon\Carbon::parse($periodKey)->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                } elseif ($period === 'monthly') {
+                    // Handle various monthly formats: "2024-01", "2024-1", "2024/01", etc.
+                    // Remove any whitespace first
+                    $periodKey = preg_replace('/\s+/', '', $periodKey);
+
+                    // Try to match YYYY-MM or YYYY-M format (with dash or slash)
+                    if (preg_match('/^(\d{4})[-\/](\d{1,2})$/', $periodKey, $matches)) {
+                        $year = $matches[1];
+                        $month = str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                        $periodKey = $year . '-' . $month;
+                    } elseif (preg_match('/^(\d{4})(\d{2})$/', $periodKey, $matches)) {
+                        // Handle format like "202401" (YYYYMM)
+                        $year = $matches[1];
+                        $month = $matches[2];
+                        $periodKey = $year . '-' . $month;
+                    } else {
+                        // Try to parse as date and format
+                        try {
+                            // Try various date formats
+                            $parsed = null;
+                            $formats = ['Y-m-d', 'Y-m', 'Y/m/d', 'Y/m', 'Ymd', 'Ym', 'Y'];
+                            foreach ($formats as $format) {
+                                try {
+                                    $parsed = \Carbon\Carbon::createFromFormat($format, $periodKey);
+                                    break;
+                                } catch (\Exception $e) {
+                                    continue;
+                                }
+                            }
+
+                            if (!$parsed) {
+                                $parsed = \Carbon\Carbon::parse($periodKey);
+                            }
+
+                            $periodKey = $parsed->format('Y-m');
+                        } catch (\Exception $e) {
+                            // If all parsing fails, try to extract year-month manually
+                            if (preg_match('/(\d{4}).*?(\d{1,2})/', $periodKey, $matches)) {
+                                $year = $matches[1];
+                                $month = str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                                $periodKey = $year . '-' . $month;
+                            }
+                        }
+                    }
+                }
+
+                return (object) [
+                    'period' => $periodKey,
+                    'total_shipment' => (int) ($item->total_shipment ?? 0),
+                    'approved_count' => (int) ($item->approved_count ?? 0),
+                    'released_count' => (int) ($item->released_count ?? 0),
+                    'invoiced_count' => (int) ($item->invoiced_count ?? 0),
+                    'processed_count' => (int) ($item->processed_count ?? 0)
                 ];
-            });
+            })
+            ->keyBy('period');
+
+        // Generate all periods in range
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+
+        // If no periods generated (no date range), return data as is
+        if (empty($allPeriods)) {
+            return response()->json([
+                'data' => $data->values(),
+                'filter_metadata' => $this->getPeriodMetadata($request, 'delivery_date')
+            ]);
+        }
+
+        // Get all unique periods from data (in case normalization created different keys)
+        $dataPeriods = $data->keys()->toArray();
+
+        // Merge data periods with allPeriods to ensure we have all periods
+        $allUniquePeriods = collect($allPeriods)
+            ->merge($dataPeriods)
+            ->unique()
+            ->sort()
+            ->values();
+
+        // Fill missing periods with zero values
+        $filledData = collect($allUniquePeriods)->map(function ($periodValue) use ($data) {
+            $existing = $data->get($periodValue);
+
+            if ($existing) {
+                return [
+                    'period' => $periodValue,
+                    'total_shipment' => $existing->total_shipment,
+                    'approved_count' => $existing->approved_count,
+                    'released_count' => $existing->released_count,
+                    'invoiced_count' => $existing->invoiced_count,
+                    'processed_count' => $existing->processed_count
+                ];
+            } else {
+                return [
+                    'period' => $periodValue,
+                    'total_shipment' => 0,
+                    'approved_count' => 0,
+                    'released_count' => 0,
+                    'invoiced_count' => 0,
+                    'processed_count' => 0
+                ];
+            }
+        })->values();
 
         return response()->json([
-            'data' => $data,
+            'data' => $filledData,
             'filter_metadata' => $this->getPeriodMetadata($request, 'delivery_date')
         ]);
     }

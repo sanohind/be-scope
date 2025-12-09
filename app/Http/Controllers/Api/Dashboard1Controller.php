@@ -538,7 +538,7 @@ class Dashboard1Controller extends ApiController
     /**
      * Generate all periods in the range based on period type
      */
-    private function generateAllPeriods(string $period, string $dateFrom, string $dateTo): array
+    protected function generateAllPeriods(string $period, ?string $dateFrom, ?string $dateTo): array
     {
         $periods = [];
         $start = Carbon::parse($dateFrom);

@@ -442,19 +442,58 @@ class Dashboard1RevisionController extends ApiController
         $groupedData = [];
         foreach ($data as $row) {
             $periodKey = $row->{$dateLabel};
+            // Normalize period key
+            $periodKey = trim((string) $periodKey);
+            if ($period === 'daily') {
+                try {
+                    $periodKey = Carbon::parse($periodKey)->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // Keep original if parsing fails
+                }
+            } elseif ($period === 'monthly') {
+                if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                    $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                } else {
+                    try {
+                        $parsed = Carbon::parse($periodKey);
+                        $periodKey = $parsed->format('Y-m');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                }
+            } elseif ($period === 'yearly') {
+                if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                    $periodKey = (string) intval($matches[1]);
+                } else {
+                    $periodKey = (string) intval($periodKey);
+                }
+            }
+
             if (!isset($groupedData[$periodKey])) {
                 $groupedData[$periodKey] = [];
             }
             $groupedData[$periodKey][] = $row;
         }
 
-        // Format response based on period
+        // Generate all periods in range
+        $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
+
+        // Format response based on period, ensuring all periods are included
         $formattedData = [];
-        foreach ($groupedData as $periodKey => $items) {
-            $formattedData[] = [
-                $dateLabel => $periodKey,
-                'data' => $items
-            ];
+        foreach ($allPeriods as $periodValue) {
+            $periodKeyStr = trim((string) $periodValue);
+            if (isset($groupedData[$periodKeyStr])) {
+                $formattedData[] = [
+                    $dateLabel => $periodKeyStr,
+                    'data' => $groupedData[$periodKeyStr]
+                ];
+            } else {
+                // Add period with empty data array
+                $formattedData[] = [
+                    $dateLabel => $periodKeyStr,
+                    'data' => []
+                ];
+            }
         }
 
         return response()->json([
@@ -509,7 +548,72 @@ class Dashboard1RevisionController extends ApiController
             ")
             ->groupByRaw($dateFormat)
             ->orderByRaw($dateFormat)
-            ->get();
+            ->get()
+            ->map(function ($item) use ($period) {
+                // Normalize period format
+                $rawPeriod = $item->period ?? '';
+                $periodKey = trim((string) $rawPeriod);
+
+                if ($period === 'daily') {
+                    try {
+                        $periodKey = Carbon::parse($periodKey)->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                } elseif ($period === 'monthly') {
+                    if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                        $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                    } else {
+                        try {
+                            $parsed = Carbon::parse($periodKey);
+                            $periodKey = $parsed->format('Y-m');
+                        } catch (\Exception $e) {
+                            // Keep original if parsing fails
+                        }
+                    }
+                } elseif ($period === 'yearly') {
+                    if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                        $periodKey = (string) intval($matches[1]);
+                    } else {
+                        $periodKey = (string) intval($periodKey);
+                    }
+                }
+
+                return (object) [
+                    'period' => $periodKey,
+                    'total_onhand' => $item->total_onhand ?? 0,
+                    'total_receipt' => $item->total_receipt ?? 0,
+                    'total_shipment' => $item->total_shipment ?? 0,
+                    'net_movement' => $item->net_movement ?? 0,
+                ];
+            })
+            ->keyBy('period');
+
+        // Generate all periods in range
+        $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
+
+        // Fill missing periods with zero values
+        $trendData = collect($allPeriods)->map(function ($periodValue) use ($data) {
+            $existing = $data->get($periodValue);
+
+            if ($existing) {
+                return [
+                    'period' => $periodValue,
+                    'total_onhand' => (string) ($existing->total_onhand ?? 0),
+                    'total_receipt' => (string) ($existing->total_receipt ?? 0),
+                    'total_shipment' => (string) ($existing->total_shipment ?? 0),
+                    'net_movement' => (string) ($existing->net_movement ?? 0),
+                ];
+            } else {
+                return [
+                    'period' => $periodValue,
+                    'total_onhand' => '0',
+                    'total_receipt' => '0',
+                    'total_shipment' => '0',
+                    'net_movement' => '0',
+                ];
+            }
+        })->values();
 
         // Get current total onhand from snapshot or current data
         $snapshotDate = $this->getSnapshotDate($request, $period);
@@ -518,7 +622,7 @@ class Dashboard1RevisionController extends ApiController
             : StockByWh::where('warehouse', $warehouse)->sum('onhand');
 
         return response()->json([
-            'trend_data' => $data,
+            'trend_data' => $trendData,
             'period' => $period,
             'granularity' => $granularity,
             'current_total_onhand' => round($currentOnhand, 2),

@@ -86,7 +86,7 @@ class Dashboard3Controller extends ApiController
      * @param string|null $dateTo
      * @return array Array of period strings
      */
-    private function generateAllPeriods(string $period, ?string $dateFrom, ?string $dateTo): array
+    protected function generateAllPeriods(string $period, ?string $dateFrom, ?string $dateTo): array
     {
         $periods = [];
 
@@ -413,11 +413,9 @@ class Dashboard3Controller extends ApiController
         // Apply date range filter
         $this->applyDateRangeFilter($query, $request, 'planning_date');
 
-        $data = $query->select('divisi', 'status')
-            ->selectRaw('SUM(qty_order) as production_volume')
-            ->selectRaw('COUNT(DISTINCT prod_no) as total_orders')
-            ->selectRaw('ROUND(AVG((qty_delivery / NULLIF(qty_order, 0)) * 100), 2) as avg_completion_rate')
-            ->groupBy('divisi', 'status')
+        $data = $query->select('divisi')
+            ->selectRaw('SUM(qty_delivery) as qty_delivery')
+            ->groupBy('divisi')
             ->orderBy('divisi')
             ->get();
 

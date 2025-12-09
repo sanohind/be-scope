@@ -66,9 +66,9 @@ class ApiController extends Controller
         } else {
             $driver = config('database.connections.' . config('database.default') . '.driver');
         }
-        
+
         $isSqlServer = in_array($driver, ['sqlsrv']);
-        
+
         switch ($period) {
             case 'daily':
                 if ($isSqlServer) {
@@ -132,5 +132,103 @@ class ApiController extends Controller
             'date_from' => $request->get('date_from'),
             'date_to' => $request->get('date_to'),
         ];
+    }
+
+    /**
+     * Generate all periods in the range based on period type
+     *
+     * @param string $period (daily, monthly, yearly)
+     * @param string|null $dateFrom Start date (Y-m-d format)
+     * @param string|null $dateTo End date (Y-m-d format)
+     * @return array Array of period strings
+     */
+    protected function generateAllPeriods(string $period, ?string $dateFrom, ?string $dateTo): array
+    {
+        $periods = [];
+
+        if (!$dateFrom && !$dateTo) {
+            return $periods;
+        }
+
+        $start = $dateFrom ? \Carbon\Carbon::parse($dateFrom) : \Carbon\Carbon::now()->startOfMonth();
+        $end = $dateTo ? \Carbon\Carbon::parse($dateTo) : \Carbon\Carbon::now();
+
+        if ($period === 'daily') {
+            $current = $start->copy();
+            while ($current->lte($end)) {
+                $periods[] = $current->format('Y-m-d');
+                $current->addDay();
+            }
+        } elseif ($period === 'monthly') {
+            $current = $start->copy()->startOfMonth();
+            $endMonth = $end->copy()->startOfMonth();
+            while ($current->lte($endMonth)) {
+                $periods[] = $current->format('Y-m');
+                $current->addMonth();
+            }
+        } elseif ($period === 'yearly') {
+            $currentYear = $start->year;
+            $endYear = $end->year;
+            while ($currentYear <= $endYear) {
+                $periods[] = (string) $currentYear;
+                $currentYear++;
+            }
+        }
+
+        return $periods;
+    }
+
+    /**
+     * Fill missing periods with zero values
+     *
+     * @param \Illuminate\Support\Collection|array $data Existing data
+     * @param array $allPeriods All periods that should exist
+     * @param string $periodKey The key name for period in data (default: 'period')
+     * @param callable|null $zeroValueCallback Callback to create zero value entry
+     * @return array Filled data array
+     */
+    protected function fillMissingPeriods($data, array $allPeriods, string $periodKey = 'period', ?callable $zeroValueCallback = null): array
+    {
+        if (empty($allPeriods)) {
+            return is_array($data) ? $data : $data->values()->toArray();
+        }
+
+        // Convert data to keyed collection
+        $dataByPeriod = collect($data)->mapWithKeys(function ($item) use ($periodKey) {
+            $key = is_object($item) ? ($item->{$periodKey} ?? null) : ($item[$periodKey] ?? null);
+            if ($key === null) {
+                return [];
+            }
+            // Normalize key format
+            $key = trim((string) $key);
+            return [$key => $item];
+        });
+
+        // Fill missing periods
+        $filledData = collect($allPeriods)->map(function ($periodValue) use ($dataByPeriod, $periodKey, $zeroValueCallback) {
+            $periodKeyStr = trim((string) $periodValue);
+
+            if ($dataByPeriod->has($periodKeyStr)) {
+                $item = $dataByPeriod->get($periodKeyStr);
+                // Ensure period key is normalized
+                if (is_object($item)) {
+                    $item->{$periodKey} = $periodKeyStr;
+                } else {
+                    $item[$periodKey] = $periodKeyStr;
+                }
+                return $item;
+            } else {
+                // Create zero value entry
+                if ($zeroValueCallback) {
+                    return $zeroValueCallback($periodValue);
+                }
+
+                // Default: create object with period and numeric fields as 0
+                $zeroEntry = (object) [$periodKey => $periodKeyStr];
+                return $zeroEntry;
+            }
+        })->values();
+
+        return $filledData->toArray();
     }
 }

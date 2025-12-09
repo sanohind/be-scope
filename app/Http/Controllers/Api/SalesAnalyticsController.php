@@ -7,12 +7,98 @@ use App\Models\SoMonitor;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class SalesAnalyticsController extends ApiController
 {
     /**
+     * Generate all year-period combinations based on year and period filters
+     *
+     * @param int|null $year
+     * @param int|null $period
+     * @return array Array of ['year' => int, 'period' => int] combinations
+     */
+    private function generateAllYearPeriods(?int $year, ?int $period): array
+    {
+        $combinations = [];
+
+        // If both year and period are specified, return only that combination
+        if ($year && $period) {
+            return [['year' => $year, 'period' => $period]];
+        }
+
+        // If only year is specified, generate all 12 months
+        if ($year && !$period) {
+            for ($month = 1; $month <= 12; $month++) {
+                $combinations[] = ['year' => $year, 'period' => $month];
+            }
+            return $combinations;
+        }
+
+        // If only period is specified, we need to get all years from data
+        // For now, return empty and let the data determine the years
+        if (!$year && $period) {
+            // We'll need to get years from actual data
+            return [];
+        }
+
+        // If neither is specified, generate current year with all months
+        if (!$year && !$period) {
+            $currentYear = Carbon::now()->year;
+            for ($month = 1; $month <= 12; $month++) {
+                $combinations[] = ['year' => $currentYear, 'period' => $month];
+            }
+            return $combinations;
+        }
+
+        return $combinations;
+    }
+
+    /**
+     * Fill missing year-period combinations with zero values
+     *
+     * @param array $data Existing data
+     * @param array $allYearPeriods All year-period combinations that should exist
+     * @param array $zeroFields Fields to set to 0 for missing periods
+     * @return array Filled data array
+     */
+    private function fillMissingYearPeriods(array $data, array $allYearPeriods, array $zeroFields = ['total_delivery' => 0, 'total_po' => 0]): array
+    {
+        if (empty($allYearPeriods)) {
+            return $data;
+        }
+
+        // Create keyed array from existing data
+        $dataByKey = [];
+        foreach ($data as $item) {
+            $key = $item['year'] . '-' . $item['period'];
+            $dataByKey[$key] = $item;
+        }
+
+        // Fill missing periods
+        $filledData = [];
+        foreach ($allYearPeriods as $yp) {
+            $key = $yp['year'] . '-' . $yp['period'];
+
+            if (isset($dataByKey[$key])) {
+                $filledData[] = $dataByKey[$key];
+            } else {
+                $zeroEntry = [
+                    'year' => $yp['year'],
+                    'period' => $yp['period'],
+                ];
+                foreach ($zeroFields as $field => $value) {
+                    $zeroEntry[$field] = $value;
+                }
+                $filledData[] = $zeroEntry;
+            }
+        }
+
+        return $filledData;
+    }
+    /**
      * Get bar chart data combining SalesShipment and SoMonitor
-     * 
+     *
      * @param Request $request
      * @return JsonResponse
      */
@@ -76,10 +162,10 @@ class SalesAnalyticsController extends ApiController
 
             // Merge data by year and period
             $mergedData = [];
-            
+
             foreach ($salesShipmentData as $row) {
                 $key = $row->year . '-' . $row->period;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -94,7 +180,7 @@ class SalesAnalyticsController extends ApiController
 
             foreach ($soMonitorData as $row) {
                 $key = $row->year . '-' . $row->period;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -116,6 +202,14 @@ class SalesAnalyticsController extends ApiController
                 return $a['period'] - $b['period'];
             });
 
+            // Generate all year-period combinations and fill missing ones
+            $allYearPeriods = $this->generateAllYearPeriods($year ? (int)$year : null, $period ? (int)$period : null);
+
+            // If we have year-period combinations to fill, do it
+            if (!empty($allYearPeriods)) {
+                $result = $this->fillMissingYearPeriods($result, $allYearPeriods, ['total_delivery' => 0, 'total_po' => 0]);
+            }
+
             return response()->json([
                 'success' => true,
                 'data' => $result,
@@ -133,7 +227,7 @@ class SalesAnalyticsController extends ApiController
 
     /**
      * Get sales shipment data by period
-     * 
+     *
      * @param Request $request
      * @return JsonResponse
      */
@@ -165,7 +259,23 @@ class SalesAnalyticsController extends ApiController
             $data = $query
                 ->orderBy('year')
                 ->orderBy('period')
-                ->get();
+                ->get()
+                ->map(function ($item) {
+                    return [
+                        'year' => (int)$item->year,
+                        'period' => (int)$item->period,
+                        'total_delivery' => (float)$item->total_delivery,
+                    ];
+                })
+                ->toArray();
+
+            // Generate all year-period combinations and fill missing ones
+            $allYearPeriods = $this->generateAllYearPeriods($year ? (int)$year : null, $period ? (int)$period : null);
+
+            // If we have year-period combinations to fill, do it
+            if (!empty($allYearPeriods)) {
+                $data = $this->fillMissingYearPeriods($data, $allYearPeriods, ['total_delivery' => 0]);
+            }
 
             return response()->json([
                 'success' => true,
@@ -184,7 +294,7 @@ class SalesAnalyticsController extends ApiController
 
     /**
      * Get SO monitor data by period
-     * 
+     *
      * @param Request $request
      * @return JsonResponse
      */
@@ -214,7 +324,23 @@ class SalesAnalyticsController extends ApiController
             $data = $query
                 ->orderBy('year')
                 ->orderBy('period')
-                ->get();
+                ->get()
+                ->map(function ($item) {
+                    return [
+                        'year' => (int)$item->year,
+                        'period' => (int)$item->period,
+                        'total_po' => (float)$item->total_po,
+                    ];
+                })
+                ->toArray();
+
+            // Generate all year-period combinations and fill missing ones
+            $allYearPeriods = $this->generateAllYearPeriods($year ? (int)$year : null, $period ? (int)$period : null);
+
+            // If we have year-period combinations to fill, do it
+            if (!empty($allYearPeriods)) {
+                $data = $this->fillMissingYearPeriods($data, $allYearPeriods, ['total_po' => 0]);
+            }
 
             return response()->json([
                 'success' => true,
@@ -233,7 +359,7 @@ class SalesAnalyticsController extends ApiController
 
     /**
      * Get combined data with details by business partner
-     * 
+     *
      * @param Request $request
      * @return JsonResponse
      */
@@ -297,10 +423,10 @@ class SalesAnalyticsController extends ApiController
 
             // Merge data by year, period, and bp_code
             $mergedData = [];
-            
+
             foreach ($salesShipmentData as $row) {
                 $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -317,7 +443,7 @@ class SalesAnalyticsController extends ApiController
 
             foreach ($soMonitorData as $row) {
                 $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -361,7 +487,7 @@ class SalesAnalyticsController extends ApiController
     /**
      * Get delivery performance chart data
      * Performance = (total_delivery / total_po) * 100
-     * 
+     *
      * @param Request $request
      * @return JsonResponse
      */
@@ -423,10 +549,10 @@ class SalesAnalyticsController extends ApiController
 
             // Merge data and calculate performance
             $mergedData = [];
-            
+
             foreach ($salesShipmentData as $row) {
                 $key = $row->year . '-' . $row->period;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -442,7 +568,7 @@ class SalesAnalyticsController extends ApiController
 
             foreach ($soMonitorData as $row) {
                 $key = $row->year . '-' . $row->period;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -474,6 +600,14 @@ class SalesAnalyticsController extends ApiController
                 return $a['period'] - $b['period'];
             });
 
+            // Generate all year-period combinations and fill missing ones
+            $allYearPeriods = $this->generateAllYearPeriods($year ? (int)$year : null, $period ? (int)$period : null);
+
+            // If we have year-period combinations to fill, do it
+            if (!empty($allYearPeriods)) {
+                $result = $this->fillMissingYearPeriods($result, $allYearPeriods, ['total_delivery' => 0, 'total_po' => 0, 'performance' => 0]);
+            }
+
             return response()->json([
                 'success' => true,
                 'data' => $result,
@@ -492,7 +626,7 @@ class SalesAnalyticsController extends ApiController
     /**
      * Get delivery performance with business partner details
      * Performance = (total_delivery / total_po) * 100
-     * 
+     *
      * @param Request $request
      * @return JsonResponse
      */
@@ -561,10 +695,10 @@ class SalesAnalyticsController extends ApiController
 
             // Merge data and calculate performance
             $mergedData = [];
-            
+
             foreach ($salesShipmentData as $row) {
                 $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -582,7 +716,7 @@ class SalesAnalyticsController extends ApiController
 
             foreach ($soMonitorData as $row) {
                 $key = $row->year . '-' . $row->period . '-' . $row->bp_code;
-                
+
                 if (!isset($mergedData[$key])) {
                     $mergedData[$key] = [
                         'year' => $row->year,
@@ -617,6 +751,10 @@ class SalesAnalyticsController extends ApiController
                 }
                 return strcmp($a['bp_code'], $b['bp_code']);
             });
+
+            // Note: For methods with business partner details, we don't fill missing periods
+            // because missing periods might be intentional (no data for that BP in that period)
+            // Only fill if specifically needed for aggregation views
 
             return response()->json([
                 'success' => true,
