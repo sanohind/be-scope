@@ -870,7 +870,34 @@ class Dashboard6Controller extends ApiController
         $dateTo = $request->get('date_to');
         $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
 
-        // If no periods generated (no date range), return data as is
+        // Get all unique periods from data (in case normalization created different keys)
+        $dataPeriods = $data->keys()->toArray();
+
+        // For monthly period, if no explicit date range, generate periods from data
+        if (empty($allPeriods) && $period === 'monthly' && !empty($dataPeriods)) {
+            // Sort data periods and generate all months for the year(s) that have data
+            $sortedPeriods = collect($dataPeriods)->sort()->values()->toArray();
+            if (!empty($sortedPeriods)) {
+                $minPeriod = reset($sortedPeriods);
+                $maxPeriod = end($sortedPeriods);
+                
+                // Parse min and max periods
+                $start = \Carbon\Carbon::createFromFormat('Y-m', $minPeriod);
+                $end = \Carbon\Carbon::createFromFormat('Y-m', $maxPeriod);
+                
+                // Generate all months from January of start year to December of end year
+                $current = $start->copy()->startOfYear();
+                $endDate = $end->copy()->endOfYear();
+                
+                $allPeriods = [];
+                while ($current->lte($endDate)) {
+                    $allPeriods[] = $current->format('Y-m');
+                    $current->addMonth();
+                }
+            }
+        }
+
+        // If still no periods generated, return data as is
         if (empty($allPeriods)) {
             return response()->json([
                 'data' => $data->values(),
@@ -878,18 +905,8 @@ class Dashboard6Controller extends ApiController
             ]);
         }
 
-        // Get all unique periods from data (in case normalization created different keys)
-        $dataPeriods = $data->keys()->toArray();
-
-        // Merge data periods with allPeriods to ensure we have all periods
-        $allUniquePeriods = collect($allPeriods)
-            ->merge($dataPeriods)
-            ->unique()
-            ->sort()
-            ->values();
-
-        // Fill missing periods with zero values
-        $filledData = collect($allUniquePeriods)->map(function ($periodValue) use ($data) {
+        // Fill missing periods with zero values using allPeriods
+        $filledData = collect($allPeriods)->map(function ($periodValue) use ($data) {
             $existing = $data->get($periodValue);
 
             if ($existing) {
