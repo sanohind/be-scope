@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Models\ProdHeader;
 use App\Models\ProdReport;
+use App\Models\ProductionPlan;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -488,24 +489,152 @@ class Dashboard3Controller extends ApiController
             }
         }
 
+        // Query ProductionPlan with same filters for matching
+        $planQuery = ProductionPlan::query();
+
+        // Apply divisi filter to ProductionPlan
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $planQuery->whereIn('divisi', $divisiSelection['codes']);
+        }
+
+        // Apply period-specific date filtering to ProductionPlan (using plan_date)
+        if ($period === 'daily') {
+            if ($dateFrom) {
+                $year = date('Y', strtotime($dateFrom));
+                $month = date('m', strtotime($dateFrom));
+                $planQuery->whereRaw("YEAR(plan_date) = ?", [$year])
+                          ->whereRaw("MONTH(plan_date) = ?", [$month]);
+            }
+        } elseif ($period === 'monthly') {
+            if ($dateFrom) {
+                $year = date('Y', strtotime($dateFrom));
+                $planQuery->whereRaw("YEAR(plan_date) = ?", [$year]);
+            }
+        } elseif ($period === 'yearly') {
+            if ($dateFrom) {
+                $planQuery->where('plan_date', '>=', $dateFrom);
+            }
+            if ($dateTo) {
+                $planQuery->where('plan_date', '<=', $dateTo);
+            }
+        }
+
+        // Get ProductionPlan data with matching keys (partno, divisi, plan_date)
+        // Sum qty_plan for records with same partno, divisi, and plan_date
+        $planDataMap = $planQuery->get()->groupBy(function ($item) {
+            return strtolower(
+                trim($item->partno ?? '') . '|' .
+                trim($item->divisi ?? '') . '|' .
+                ($item->plan_date ? $item->plan_date->format('Y-m-d') : '')
+            );
+        })->map(function ($group) {
+            return $group->sum(function ($item) {
+                return (float) ($item->qty_plan ?? 0);
+            });
+        });
+
         // Get date format based on period for grouping
         $dateFormat = $this->getDateFormatByPeriod($period, 'trans_date', $query);
 
-        // Calculate qty_pelaporan based on prod_index (sum by prod_index)
-        $data = $query->selectRaw("$dateFormat as period")
-            ->selectRaw('SUM(qty_pelaporan) as qty_pelaporan')
-            ->groupByRaw($dateFormat)
-            ->orderByRaw($dateFormat)
+        // Get ProdReport data with detail for matching, then group by period
+        // We need to match each ProdReport row with ProductionPlan before grouping
+        $reportData = $query->select([
+                'part_number',
+                'divisi',
+                'trans_date',
+                'qty_pelaporan'
+            ])
+            ->selectRaw("$dateFormat as period")
+            ->get();
+
+        // Match with ProductionPlan and group by period
+        $data = $reportData->groupBy('period')
+            ->map(function ($group, $periodKey) use ($planDataMap, $period) {
+            $qtyPelaporan = 0;
+            $qtyPlan = 0;
+
+            foreach ($group as $item) {
+                $qtyPelaporan += (float) ($item->qty_pelaporan ?? 0);
+
+                // Match with ProductionPlan: part_number=partno, divisi=divisi, trans_date=plan_date
+                $matchKey = strtolower(
+                    trim($item->part_number ?? '') . '|' .
+                    trim($item->divisi ?? '') . '|' .
+                    ($item->trans_date ? Carbon::parse($item->trans_date)->format('Y-m-d') : '')
+                );
+
+                if ($planDataMap->has($matchKey)) {
+                    $qtyPlan += (float) $planDataMap->get($matchKey);
+                }
+            }
+
+            // Normalize period format
+            $periodValue = trim((string) $periodKey);
+
+            // For daily period, ensure format is Y-m-d
+            if ($period === 'daily' && preg_match('/^\d{4}-\d{2}-\d{2}/', $periodValue)) {
+                // Already in correct format
+            } elseif ($period === 'daily') {
+                try {
+                    $periodValue = Carbon::parse($periodValue)->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // Keep original if parsing fails
+                }
+            }
+
+            return [
+                'period' => $periodValue,
+                'qty_pelaporan' => number_format($qtyPelaporan, 2, '.', ''),
+                'qty_plan' => number_format($qtyPlan, 2, '.', '')
+            ];
+        });
+
+        // Generate all periods in range and fill missing ones with 0
+        $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+
+        // Also get ProductionPlan data grouped by period (for periods that might not have ProdReport data)
+        // Create a new query since $planQuery was already executed
+        $planQueryForPeriod = ProductionPlan::query();
+
+        // Apply divisi filter to ProductionPlan
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $planQueryForPeriod->whereIn('divisi', $divisiSelection['codes']);
+        }
+
+        // Apply period-specific date filtering to ProductionPlan (using plan_date)
+        if ($period === 'daily') {
+            if ($dateFrom) {
+                $year = date('Y', strtotime($dateFrom));
+                $month = date('m', strtotime($dateFrom));
+                $planQueryForPeriod->whereRaw("YEAR(plan_date) = ?", [$year])
+                          ->whereRaw("MONTH(plan_date) = ?", [$month]);
+            }
+        } elseif ($period === 'monthly') {
+            if ($dateFrom) {
+                $year = date('Y', strtotime($dateFrom));
+                $planQueryForPeriod->whereRaw("YEAR(plan_date) = ?", [$year]);
+            }
+        } elseif ($period === 'yearly') {
+            if ($dateFrom) {
+                $planQueryForPeriod->where('plan_date', '>=', $dateFrom);
+            }
+            if ($dateTo) {
+                $planQueryForPeriod->where('plan_date', '<=', $dateTo);
+            }
+        }
+
+        $planDateFormat = $this->getDateFormatByPeriod($period, 'plan_date', $planQueryForPeriod);
+        $planDataByPeriod = $planQueryForPeriod->selectRaw("$planDateFormat as period")
+            ->selectRaw('SUM(qty_plan) as qty_plan')
+            ->groupByRaw($planDateFormat)
+            ->orderByRaw($planDateFormat)
             ->get()
             ->map(function ($item) use ($period) {
-                // Normalize period format
                 $periodValue = trim((string) $item->period);
 
-                // For daily period, ensure format is Y-m-d
                 if ($period === 'daily' && preg_match('/^\d{4}-\d{2}-\d{2}/', $periodValue)) {
                     // Already in correct format
                 } elseif ($period === 'daily') {
-                    // Try to parse and reformat
                     try {
                         $periodValue = Carbon::parse($periodValue)->format('Y-m-d');
                     } catch (\Exception $e) {
@@ -513,32 +642,52 @@ class Dashboard3Controller extends ApiController
                     }
                 }
 
-                // Ensure qty_pelaporan is formatted as string with 2 decimals
-                $qty = is_numeric($item->qty_pelaporan)
-                    ? number_format((float) $item->qty_pelaporan, 2, '.', '')
-                    : '0.00';
                 return [
                     'period' => $periodValue,
-                    'qty_pelaporan' => $qty
+                    'qty_plan' => number_format((float) ($item->qty_plan ?? 0), 2, '.', '')
                 ];
             })
             ->keyBy('period');
 
-        // Generate all periods in range and fill missing ones with 0
-        $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
-
-        // If no periods generated (no dateFrom), return data as is
+        // Merge data: use qty_plan from matched data, or from planDataByPeriod if no match
         if (empty($allPeriods)) {
-            $filledData = $data->values();
+            $filledData = $data->map(function ($item) use ($planDataByPeriod) {
+                $periodKey = $item['period'];
+                // Use matched qty_plan if available, otherwise use planDataByPeriod
+                $qtyPlan = $item['qty_plan'] !== '0.00'
+                    ? $item['qty_plan']
+                    : ($planDataByPeriod->has($periodKey) ? $planDataByPeriod->get($periodKey)['qty_plan'] : '0.00');
+
+                return [
+                    'period' => $item['period'],
+                    'qty_pelaporan' => $item['qty_pelaporan'],
+                    'qty_plan' => $qtyPlan
+                ];
+            })
+            ->sortBy('period')
+            ->values();
         } else {
-            $filledData = collect($allPeriods)->map(function ($periodValue) use ($data) {
+            $filledData = collect($allPeriods)->map(function ($periodValue) use ($data, $planDataByPeriod) {
                 $periodKey = (string) $periodValue;
+
+                $qtyPelaporan = '0.00';
+                $qtyPlan = '0.00';
+
                 if ($data->has($periodKey)) {
-                    return $data->get($periodKey);
+                    $item = $data->get($periodKey);
+                    $qtyPelaporan = $item['qty_pelaporan'];
+                    $qtyPlan = $item['qty_plan'];
                 }
+
+                // If no ProdReport data for this period, check ProductionPlan directly
+                if ($qtyPlan === '0.00' && $planDataByPeriod->has($periodKey)) {
+                    $qtyPlan = $planDataByPeriod->get($periodKey)['qty_plan'];
+                }
+
                 return [
                     'period' => $periodKey,
-                    'qty_pelaporan' => '0.00'
+                    'qty_pelaporan' => $qtyPelaporan,
+                    'qty_plan' => $qtyPlan
                 ];
             })->values();
         }

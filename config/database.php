@@ -139,6 +139,19 @@ return [
             'encrypt' => env('DB_ENCRYPT', 'no'),
             'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', true),
         ],
+        'scm' => [
+            'driver' => 'mysql',
+            'host' => env('DB_HOST4', '10.1.10.111'),
+            'port' => env('DB_PORT4', '3306'),
+            'database' => env('DB_DATABASE4', 'scm'),
+            'username' => env('DB_USERNAME4', 'sanohscm'),
+            'password' => env('DB_PASSWORD4', 'S@n0hscm25'),
+            'charset' => 'utf8',
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'encrypt' => env('DB_ENCRYPT', 'no'),
+            'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', true),
+        ],
 
     ],
 

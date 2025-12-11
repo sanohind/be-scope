@@ -143,6 +143,13 @@ class SyncErpData extends Command
             $successRecords += $result['success'];
             $failedRecords += $result['failed'];
 
+            // Sync DnDetail
+            $this->info('Syncing DnDetail...');
+            $result = $this->syncDnDetail();
+            $totalRecords += $result['total'];
+            $successRecords += $result['success'];
+            $failedRecords += $result['failed'];
+
             // Update sync log with final results
             $syncLog->status = 'completed';
             $syncLog->completed_at = now();
@@ -1081,6 +1088,131 @@ class SyncErpData extends Command
             $this->error("Error syncing SalesShipment: " . $e->getMessage());
             return ['total' => 0, 'success' => 0, 'failed' => 0];
         }
+    }
+
+    private function syncDnDetail()
+    {
+        try {
+            $success = 0;
+            $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
+            $total = 0;
+            $chunkSize = 500;
+
+            // Natural key: no_dn + dn_line (not enforced in DB)
+            $uniqueKeys = ['no_dn', 'dn_line'];
+
+            // Sync from ERP (10.1.10.52) - default
+            $this->info('Syncing DnDetail from ERP...');
+            $result = $this->syncDnDetailFromSource('erp', $uniqueKeys, $chunkSize, $success, $failed, $updated, $inserted, $skipped, $total);
+            $success = $result['success'];
+            $failed = $result['failed'];
+            $updated = $result['updated'];
+            $inserted = $result['inserted'];
+            $skipped = $result['skipped'];
+            $total = $result['total'];
+
+            // Sync from ERP2 for initialization (historical)
+            if ($this->isInitialization) {
+                $this->info('Syncing DnDetail from ERP2 (historical data)...');
+                $result = $this->syncDnDetailFromSource('erp2', $uniqueKeys, $chunkSize, $success, $failed, $updated, $inserted, $skipped, $total);
+                $success = $result['success'];
+                $failed = $result['failed'];
+                $updated = $result['updated'];
+                $inserted = $result['inserted'];
+                $skipped = $result['skipped'];
+                $total = $result['total'];
+            }
+
+            $this->info("DnDetail sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
+        } catch (Exception $e) {
+            $this->error("Error syncing DnDetail: " . $e->getMessage());
+            return ['total' => 0, 'success' => 0, 'failed' => 0];
+        }
+    }
+
+    /**
+     * Helper method to sync DnDetail from given connection
+     */
+    private function syncDnDetailFromSource($connection, $uniqueKeys, $chunkSize, &$success, &$failed, &$updated, &$inserted, &$skipped, &$total)
+    {
+        $query = DB::connection($connection)->table('dn_detail');
+
+        if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+            $query->whereBetween('dn_create_date', [$this->dateFrom->format('Y-m-d'), $this->dateTo->format('Y-m-d 23:59:59')]);
+        }
+
+        $query->orderBy('no_dn')->chunk($chunkSize, function ($records) use (&$success, &$failed, &$updated, &$inserted, &$skipped, &$total, $uniqueKeys) {
+            foreach ($records as $record) {
+                try {
+                    $data = [
+                        'no_dn' => $record->no_dn,
+                        'dn_line' => $record->dn_line,
+                        'dn_supplier' => $record->dn_supplier,
+                        'dn_create_date' => $record->dn_create_date,
+                        'dn_year' => $record->dn_year,
+                        'dn_period' => $record->dn_period,
+                        'plan_delivery_date' => $record->plan_delivery_date,
+                        'plan_delivery_time' => $record->plan_delivery_time,
+                        'order_origin' => $record->order_origin,
+                        'no_order' => $record->no_order,
+                        'order_set' => $record->order_set,
+                        'order_line' => $record->order_line,
+                        'order_seq' => $record->order_seq,
+                        'part_no' => $record->part_no,
+                        'item_desc_a' => $record->item_desc_a,
+                        'item_desc_b' => $record->item_desc_b,
+                        'supplier_item_no' => $record->supplier_item_no,
+                        'lot_number' => $record->lot_number,
+                        'dn_qty' => $record->dn_qty,
+                        'receipt_qty' => $record->receipt_qty,
+                        'dn_unit' => $record->dn_unit,
+                        'dn_snp' => $record->dn_snp,
+                        'reference' => $record->reference,
+                        'actual_receipt_date' => $record->actual_receipt_date,
+                        'actual_receipt_time' => $record->actual_receipt_time,
+                        'warehouse' => $record->warehouse,
+                        'status_code' => $record->status_code,
+                        'status_desc' => $record->status_desc,
+                    ];
+
+                    $result = $this->upsertRecord('dn_detail', $data, $uniqueKeys);
+
+                    if ($result['action'] === 'updated') {
+                        $updated++;
+                    } elseif ($result['action'] === 'inserted') {
+                        $inserted++;
+                    } else {
+                        $skipped++;
+                    }
+
+                    $success++;
+                    $total++;
+                } catch (Exception $e) {
+                    $failed++;
+                    $total++;
+                    $this->warn("Failed to sync DnDetail record (no_dn: {$record->no_dn}, dn_line: {$record->dn_line}): " . $e->getMessage());
+                }
+            }
+
+            if ($total % 1000 == 0) {
+                $this->info("Processed " . number_format($total) . " DnDetail records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
+            }
+
+            gc_collect_cycles();
+        });
+
+        return [
+            'success' => $success,
+            'failed' => $failed,
+            'updated' => $updated,
+            'inserted' => $inserted,
+            'skipped' => $skipped,
+            'total' => $total
+        ];
     }
 
     /**

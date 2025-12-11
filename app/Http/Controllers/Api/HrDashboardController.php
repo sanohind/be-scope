@@ -373,131 +373,21 @@ class HrDashboardController extends ApiController
     }
 
     /**
-     * Count active employees (endDate is null)
+     * Count active employees (end_date is null)
      * GET /api/dashboard/hr/active-employees-count
+     * Data source: Local database (employee_master table)
      */
     public function activeEmployeesCount(Request $request): JsonResponse
     {
         try {
-            $accessToken = $this->getAccessToken();
-
-            if (!$accessToken) {
-                return $this->sendError('Failed to obtain access token', [], 500);
-            }
-
-            $page = 1;
-            $limit = 100;
-            $totalActive = 0;
-            $totalPages = 1;
-            $retryCount = 0;
-            $maxRetries = 2;
-
-            do {
-                // Use POST method with JSON body for /employees endpoint
-                $response = Http::withHeaders([
-                    'Authorization' => 'Bearer ' . $accessToken,
-                    'Accept' => 'application/json',
-                    'Content-Type' => 'application/json',
-                ])->post(self::BASE_URL . '/employees', [
-                    'page' => $page,
-                    'limit' => $limit,
-                ]);
-
-                if (!$response->successful()) {
-                    // If unauthorized, try to refresh token and retry once
-                    if ($response->status() === 401 && $retryCount < $maxRetries) {
-                        Log::warning('HR API 401 Unauthorized, attempting token refresh');
-                        $retryCount++;
-
-                        // Force refresh token
-                        $token = HrApiToken::getLatest();
-                        if ($token && $token->refresh_token) {
-                            $refreshResponse = Http::post(self::BASE_URL . '/auth/refresh', [
-                                'refreshToken' => $token->refresh_token,
-                            ]);
-
-                            if ($refreshResponse->successful()) {
-                                $refreshData = $refreshResponse->json();
-                                $accessToken = $refreshData['accessToken'] ?? $refreshData['access_token'] ?? null;
-
-                                if ($accessToken) {
-                                    // Update token in database
-                                    $createdAt = $refreshData['createdAt'] ?? $refreshData['created_at'] ?? null;
-                                    $expiredAt = $refreshData['expiredAt'] ?? $refreshData['expired_at'] ?? null;
-
-                                    if (is_numeric($createdAt)) {
-                                        $createdAt = date('Y-m-d H:i:s', $createdAt);
-                                    }
-                                    if (is_numeric($expiredAt)) {
-                                        $expiredAt = date('Y-m-d H:i:s', $expiredAt);
-                                    }
-
-                                    $token->update([
-                                        'access_token' => $accessToken,
-                                        'refresh_token' => $refreshData['refreshToken'] ?? $refreshData['refresh_token'] ?? $token->refresh_token,
-                                        'token_created_at' => $createdAt,
-                                        'expired_at' => $expiredAt,
-                                    ]);
-
-                                    Log::info('HR API Token refreshed successfully, retrying request');
-
-                                    // Retry with new token using POST
-                                    $response = Http::withHeaders([
-                                        'Authorization' => 'Bearer ' . $accessToken,
-                                        'Accept' => 'application/json',
-                                        'Content-Type' => 'application/json',
-                                    ])->post(self::BASE_URL . '/employees', [
-                                        'page' => $page,
-                                        'limit' => $limit,
-                                    ]);
-                                }
-                            }
-                        }
-                    }
-
-                    if (!$response->successful()) {
-                        Log::error('HR API Failed to fetch employees', [
-                            'status' => $response->status(),
-                            'body' => $response->body(),
-                            'endpoint' => '/employees',
-                            'method' => 'POST'
-                        ]);
-                        return $this->sendError(
-                            'Failed to fetch employees from HR API',
-                            [
-                                'error' => $response->body(),
-                                'status' => $response->status(),
-                                'endpoint' => '/employees',
-                                'method' => 'POST'
-                            ],
-                            500
-                        );
-                    }
-                }
-
-                $data = $response->json();
-                $totalPages = $data['totalPage'] ?? $data['total_page'] ?? 1;
-
-                // Count active employees (endDate is null)
-                if (isset($data['data']) && is_array($data['data'])) {
-                    foreach ($data['data'] as $employee) {
-                        // Handle both camelCase and snake_case
-                        $endDate = $employee['endDate'] ?? $employee['end_date'] ?? null;
-                        if ($endDate === null) {
-                            $totalActive++;
-                        }
-                    }
-                }
-
-                $page++;
-            } while ($page <= $totalPages);
+            // Count active employees directly from database
+            $totalActive = EmployeeMaster::whereNull('end_date')->count();
 
             return $this->sendResponse([
                 'total_active_employees' => $totalActive,
-                'total_pages_processed' => $totalPages,
             ], 'Active employees count retrieved successfully');
         } catch (\Exception $e) {
-            Log::error('HR API Active Employees Count Error: ' . $e->getMessage(), [
+            Log::error('Active Employees Count Error: ' . $e->getMessage(), [
                 'trace' => $e->getTraceAsString()
             ]);
             return $this->sendError('Failed to count active employees: ' . $e->getMessage(), [], 500);
@@ -622,55 +512,38 @@ class HrDashboardController extends ApiController
      * GET /api/dashboard/hr/employment-status-comparison
      *
      * Returns count of ACTIVE employees by employment status: PERMANENT, CONTRACT, OUTSOURCING, PROBATION
-     * Only includes employees with endDate = null (active employees)
+     * Only includes employees with end_date = null (active employees)
+     * Data source: Local database (employee_master table)
      */
     public function employmentStatusComparison(Request $request): JsonResponse
     {
         try {
-            $allEmployees = $this->fetchAllDataFromApi('/employees');
-
-            foreach ($allEmployees as $employee) {
-                // Filter only active employees (endDate = null)
-                $endDate = $employee['endDate'] ?? $employee['end_date'] ?? $employee['empEndDate'] ?? null;
-
-                // Skip if employee is not active (has endDate)
-                if ($endDate !== null) {
-                    continue;
-                }
-
-                // Try multiple possible field names for employment status
-                $status = $employee['employmentStatus']
-                    ?? $employee['employment_status']
-                    ?? $employee['empStatus']
-                    ?? $employee['employmentStatusCode']
-                    ?? null;
-
-                if ($status && isset($statusCount[$status])) {
-                    $statusCount[$status]++;
-                } elseif ($status) {
-                    // If status exists but not in our list, add it
-                    if (!isset($statusCount[$status])) {
-                        $statusCount[$status] = 0;
-                    }
-                    $statusCount[$status]++;
-                }
-            }
+            // Get employment status counts for active employees (end_date is null)
+            $statusCounts = EmployeeMaster::whereNull('end_date')
+                ->groupBy('employment_status')
+                ->selectRaw('employment_status as status, count(*) as count')
+                ->get();
 
             $data = [];
-            foreach ($statusCount as $status => $count) {
+            $summary = [];
+            $total = 0;
+
+            foreach ($statusCounts as $item) {
                 $data[] = [
-                    'status' => $status,
-                    'count' => $count,
+                    'status' => $item->status,
+                    'count' => $item->count,
                 ];
+                $summary[$item->status] = $item->count;
+                $total += $item->count;
             }
 
             return $this->sendResponse([
                 'data' => $data,
-                'total' => array_sum($statusCount),
-                'summary' => $statusCount,
+                'total' => $total,
+                'summary' => $summary,
             ], 'Employment status comparison retrieved successfully');
         } catch (\Exception $e) {
-            Log::error('HR API Employment Status Comparison Error: ' . $e->getMessage());
+            Log::error('Employment Status Comparison Error: ' . $e->getMessage());
             return $this->sendError('Failed to get employment status comparison: ' . $e->getMessage(), [], 500);
         }
     }
@@ -752,8 +625,9 @@ class HrDashboardController extends ApiController
      * Chart 3: Present Attendance by Shift
      * GET /api/dashboard/hr/present-attendance-by-shift
      *
-     * Returns count of Present Attendance (attendCode: "PRS") grouped by shiftdailyCode
+     * Returns count of Present Attendance (attend_code: "PRS") grouped by shiftdaily_code
      * Supports filtering: period (daily/monthly), startDate, endDate
+     * Data source: Local database (attendance_by_period table)
      *
      * Query Parameters:
      * - period: 'daily' or 'monthly' (default: 'daily')
@@ -773,62 +647,13 @@ class HrDashboardController extends ApiController
                 $endDate = now()->endOfMonth()->format('Y-m-d');
             }
 
-            $accessToken = $this->getAccessToken();
-            if (!$accessToken) {
-                return $this->sendError('Failed to obtain access token', [], 500);
-            }
-
-            // Fetch data from /attendances/byPeriod endpoint
-            $response = Http::withHeaders([
-                'Authorization' => 'Bearer ' . $accessToken,
-                'Accept' => 'application/json',
-                'Content-Type' => 'application/json',
-            ])->get(self::BASE_URL . '/attendances/byPeriod', [
-                'startDate' => $startDate,
-                'endDate' => $endDate,
-            ]);
-
-            if (!$response->successful()) {
-                if ($response->status() === 401) {
-                    $accessToken = $this->getAccessToken();
-                    if (!$accessToken) {
-                        return $this->sendError('Unauthorized: Failed to refresh token', [], 401);
-                    }
-                    $response = Http::withHeaders([
-                        'Authorization' => 'Bearer ' . $accessToken,
-                        'Accept' => 'application/json',
-                        'Content-Type' => 'application/json',
-                    ])->get(self::BASE_URL . '/attendances/byPeriod', [
-                        'startDate' => $startDate,
-                        'endDate' => $endDate,
-                    ]);
-                }
-
-                if (!$response->successful()) {
-                    return $this->sendError(
-                        'Failed to fetch attendance data',
-                        ['error' => $response->body(), 'status' => $response->status()],
-                        500
-                    );
-                }
-            }
-
-            $responseData = $response->json();
-            $allData = $responseData['data'] ?? [];
-
-            // Filter only PRS (Present) attendance
-            $prsData = array_filter($allData, function ($item) {
-                return ($item['attendCode'] ?? null) === 'PRS';
-            });
+            // Fetch PRS (Present) attendance data from local database
+            $prsData = AttendanceByPeriod::where('attend_code', 'PRS')
+                ->whereBetween(DB::raw('DATE(shiftstarttime)'), [$startDate, $endDate])
+                ->get();
 
             // Get all unique shift codes from the data
-            $allShiftCodes = [];
-            foreach ($allData as $item) {
-                $shiftCode = $item['shiftdailyCode'] ?? 'UNKNOWN';
-                if (!in_array($shiftCode, $allShiftCodes)) {
-                    $allShiftCodes[] = $shiftCode;
-                }
-            }
+            $allShiftCodes = $prsData->pluck('shiftdaily_code')->unique()->values()->toArray();
 
             // Generate all periods in the range
             $allPeriods = [];
@@ -850,20 +675,20 @@ class HrDashboardController extends ApiController
                 }
             }
 
-            // Group by shiftdailyCode and period
+            // Group by shiftdaily_code and period
             $groupedData = [];
 
             foreach ($prsData as $item) {
-                $shiftCode = $item['shiftdailyCode'] ?? 'UNKNOWN';
-                $shiftStartTime = $item['shiftstarttime'] ?? null;
+                $shiftCode = $item->shiftdaily_code ?? 'UNKNOWN';
+                $shiftStartTime = $item->shiftstarttime;
 
                 if ($period === 'daily') {
                     // Group by date (YYYY-MM-DD)
-                    $dateKey = $shiftStartTime ? date('Y-m-d', strtotime($shiftStartTime)) : 'UNKNOWN';
+                    $dateKey = $shiftStartTime ? $shiftStartTime->format('Y-m-d') : 'UNKNOWN';
                     $groupKey = $shiftCode . '|' . $dateKey;
                 } else {
                     // Group by month (YYYY-MM)
-                    $monthKey = $shiftStartTime ? date('Y-m', strtotime($shiftStartTime)) : 'UNKNOWN';
+                    $monthKey = $shiftStartTime ? $shiftStartTime->format('Y-m') : 'UNKNOWN';
                     $groupKey = $shiftCode . '|' . $monthKey;
                 }
 
@@ -871,8 +696,8 @@ class HrDashboardController extends ApiController
                     $groupedData[$groupKey] = [
                         'shiftdailyCode' => $shiftCode,
                         'period' => $period === 'daily'
-                            ? ($shiftStartTime ? date('Y-m-d', strtotime($shiftStartTime)) : 'UNKNOWN')
-                            : ($shiftStartTime ? date('Y-m', strtotime($shiftStartTime)) : 'UNKNOWN'),
+                            ? ($shiftStartTime ? $shiftStartTime->format('Y-m-d') : 'UNKNOWN')
+                            : ($shiftStartTime ? $shiftStartTime->format('Y-m') : 'UNKNOWN'),
                         'count' => 0,
                     ];
                 }
@@ -915,7 +740,7 @@ class HrDashboardController extends ApiController
                 ],
             ], 'Present attendance by shift retrieved successfully');
         } catch (\Exception $e) {
-            Log::error('HR API Present Attendance By Shift Error: ' . $e->getMessage());
+            Log::error('Present Attendance By Shift Error: ' . $e->getMessage());
             return $this->sendError('Failed to get present attendance by shift: ' . $e->getMessage(), [], 500);
         }
     }

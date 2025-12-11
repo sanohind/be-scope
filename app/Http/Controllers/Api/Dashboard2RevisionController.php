@@ -156,6 +156,11 @@ class Dashboard2RevisionController extends ApiController
     {
         if (empty($data)) {
             // If no data, create zero entries for all periods
+            if ($zeroValueCallback) {
+                return collect($allPeriods)->map(function ($periodValue) use ($zeroValueCallback) {
+                    return $zeroValueCallback($periodValue);
+                })->toArray();
+            }
             return collect($allPeriods)->map(function ($periodValue) use ($periodKey) {
                 return (object) [
                     $periodKey => $periodValue,
@@ -222,6 +227,75 @@ class Dashboard2RevisionController extends ApiController
                     }
                     $filledData[] = $zeroEntry;
                 }
+            }
+        }
+
+        return $filledData;
+    }
+
+    /**
+     * Generate all year-period combinations similar to SalesAnalyticsController
+     */
+    private function generateAllYearPeriods(?int $year, ?int $period): array
+    {
+        $combinations = [];
+
+        if ($year && $period) {
+            return [['year' => $year, 'period' => $period]];
+        }
+
+        if ($year && !$period) {
+            for ($month = 1; $month <= 12; $month++) {
+                $combinations[] = ['year' => $year, 'period' => $month];
+            }
+            return $combinations;
+        }
+
+        if (!$year && $period) {
+            return [];
+        }
+
+        if (!$year && !$period) {
+            $currentYear = Carbon::now()->year;
+            for ($month = 1; $month <= 12; $month++) {
+                $combinations[] = ['year' => $currentYear, 'period' => $month];
+            }
+            return $combinations;
+        }
+
+        return $combinations;
+    }
+
+    /**
+     * Fill missing year-period combinations with zero values
+     */
+    private function fillMissingYearPeriods(array $data, array $allYearPeriods, array $zeroFields = ['total_dn_qty' => 0, 'total_receipt_qty' => 0]): array
+    {
+        if (empty($allYearPeriods)) {
+            return $data;
+        }
+
+        $dataByKey = [];
+        foreach ($data as $item) {
+            $key = $item['year'] . '-' . $item['period'];
+            $dataByKey[$key] = $item;
+        }
+
+        $filledData = [];
+        foreach ($allYearPeriods as $yp) {
+            $key = $yp['year'] . '-' . $yp['period'];
+
+            if (isset($dataByKey[$key])) {
+                $filledData[] = $dataByKey[$key];
+            } else {
+                $zeroEntry = [
+                    'year' => $yp['year'],
+                    'period' => $yp['period'],
+                ];
+                foreach ($zeroFields as $field => $value) {
+                    $zeroEntry[$field] = $value;
+                }
+                $filledData[] = $zeroEntry;
             }
         }
 
@@ -382,6 +456,70 @@ class Dashboard2RevisionController extends ApiController
                 'to' => $dateRange['date_to'],
                 'days_diff' => $dateRange['days_diff']
             ]
+        ]);
+    }
+
+    /**
+     * CHART X: DN Plan vs Receipt (bar chart style)
+     * Source: ERP connection, table dn_detail
+     * Date field: plan_delivery_date
+     * Metrics: total dn_qty (plan) and receipt_qty per period
+     * Filters: warehouse (required), date_from/date_to, period (daily/monthly/yearly)
+     */
+    public function dnPlanReceiptChart(Request $request): JsonResponse
+    {
+        $warehouseSelection = $this->getWarehouse($request);
+        $warehouseCodes = $warehouseSelection['codes'];
+        $period = $this->getPeriod($request);
+        $dateRange = $this->getDateRange($request, 30, $period);
+        $dateFormat = $this->getDateFormatByPeriod($period, 'plan_delivery_date');
+
+        $query = DB::connection('erp')
+            ->table('dn_detail')
+            ->whereIn('warehouse', $warehouseCodes)
+            ->whereBetween('plan_delivery_date', [$dateRange['date_from'], $dateRange['date_to']]);
+
+        $data = $query
+            ->selectRaw("$dateFormat as period_date")
+            ->selectRaw('SUM(dn_qty) as total_dn_qty')
+            ->selectRaw('SUM(receipt_qty) as total_receipt_qty')
+            ->groupByRaw($dateFormat)
+            ->orderByRaw($dateFormat)
+            ->get()
+            ->map(function ($item) {
+                // Normalize period_date to ensure consistent format
+                $item->period_date = trim((string) $item->period_date);
+                // Ensure numeric fields are properly cast
+                $item->total_dn_qty = (float) ($item->total_dn_qty ?? 0);
+                $item->total_receipt_qty = (float) ($item->total_receipt_qty ?? 0);
+                return $item;
+            })
+            ->toArray();
+
+        // Generate all periods in the date range
+        $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
+
+        // Fill missing periods with zero values
+        $filledData = $this->fillMissingPeriods($data, $allPeriods, 'period_date', function ($p) {
+            return (object)[
+                'period_date' => (string) $p,
+                'total_dn_qty' => 0,
+                'total_receipt_qty' => 0,
+            ];
+        });
+
+        return response()->json([
+            'data' => $filledData,
+            'count' => count($filledData),
+            'warehouse' => $warehouseSelection['requested'],
+            'warehouse_codes' => $warehouseCodes,
+            'period' => $period,
+            'date_range' => [
+                'from' => $dateRange['date_from'],
+                'to' => $dateRange['date_to'],
+                'days' => $dateRange['days_diff'],
+            ],
+            'date_field' => 'plan_delivery_date',
         ]);
     }
 

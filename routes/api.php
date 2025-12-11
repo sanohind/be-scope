@@ -24,6 +24,9 @@ use App\Http\Controllers\Api\Dashboard1RevisionController;
 use App\Http\Controllers\Api\Dashboard2RevisionController;
 use App\Http\Controllers\Api\HrDashboardController;
 use App\Http\Controllers\Api\SalesAnalyticsController;
+use App\Http\Controllers\Api\DailyUseWhController;
+use App\Http\Controllers\Api\ProductionPlanController;
+use App\Http\Controllers\Api\FileDownloadController;
 
 /*
 |--------------------------------------------------------------------------
@@ -41,6 +44,28 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 });
 
 Route::get('/stock/daily', [DailyStockController::class, 'index']);
+
+// Daily Use WH API Routes
+Route::prefix('daily-use-wh')->group(function () {
+    Route::post('/import', [DailyUseWhController::class, 'import']);
+    Route::post('/store', [DailyUseWhController::class, 'store']);
+    Route::get('/', [DailyUseWhController::class, 'index']);
+    Route::get('/{id}', [DailyUseWhController::class, 'show']);
+    Route::put('/{id}', [DailyUseWhController::class, 'update']);
+    Route::delete('/{id}', [DailyUseWhController::class, 'destroy']);
+    Route::post('/delete-multiple', [DailyUseWhController::class, 'destroyMultiple']);
+});
+
+// Production Plan API Routes
+Route::prefix('production-plan')->group(function () {
+    Route::post('/import', [ProductionPlanController::class, 'import']);
+    Route::post('/store', [ProductionPlanController::class, 'store']);
+    Route::get('/', [ProductionPlanController::class, 'index']);
+    Route::get('/{id}', [ProductionPlanController::class, 'show']);
+    Route::put('/{id}', [ProductionPlanController::class, 'update']);
+    Route::delete('/{id}', [ProductionPlanController::class, 'destroy']);
+    Route::post('/delete-multiple', [ProductionPlanController::class, 'destroyMultiple']);
+});
 
 // Public API Routes (add auth middleware if needed)
 Route::apiResources([
@@ -133,6 +158,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/monthly-inbound-vs-outbound', [Dashboard2RevisionController::class, 'monthlyInboundVsOutbound']);
         Route::get('/top-destinations', [Dashboard2RevisionController::class, 'topDestinations']);
         Route::get('/stock-level', [Dashboard1RevisionController::class, 'stockLevelTable']);
+        Route::get('/dn-plan-receipt', [Dashboard2RevisionController::class, 'dnPlanReceiptChart']);
         Route::get('/all-data', [Dashboard2RevisionController::class, 'getAllData']);
     });
 
@@ -251,4 +277,10 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/delivery-performance', [SalesAnalyticsController::class, 'getDeliveryPerformance']);
         Route::get('/delivery-performance-by-bp', [SalesAnalyticsController::class, 'getDeliveryPerformanceByBp']);
     });
+});
+
+// File Download Routes
+Route::prefix('files')->group(function () {
+    Route::get('/list/{folder}', [FileDownloadController::class, 'listFiles']);
+    Route::get('/download/{folder}/{filename}', [FileDownloadController::class, 'downloadFile']);
 });

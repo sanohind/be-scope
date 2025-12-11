@@ -6,6 +6,7 @@ use App\Models\StockByWh;
 use App\Models\StockByWhSnapshot;
 use App\Models\WarehouseStockSummary;
 use App\Models\InventoryTransaction;
+use App\Models\DailyUseWh;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -1481,13 +1482,159 @@ class Dashboard1RevisionController extends ApiController
             ->limit($perPage)
             ->get();
 
+        // Stock Use Planning: Calculate estimatedConsumption and daily_use based on DailyUseWh
+        $planDate = $request->input('plan_date');
+        $planDateFrom = $request->input('date_from');
+        $planDateTo = $request->input('date_to');
+        $estimatedConsumptionMap = [];
+        $dailyUseMap = [];
+
+        // Determine plan_date filtering (exact or range)
+        $useExactPlanDate = !empty($planDate);
+        $usePlanDateRange = !$useExactPlanDate && ($planDateFrom || $planDateTo);
+
+        if ($useExactPlanDate || $usePlanDateRange) {
+            try {
+                $planDateParsed = null;
+                $planDateRange = null;
+
+                if ($useExactPlanDate) {
+                    $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+                } elseif ($usePlanDateRange) {
+                    // Use date range when plan_date not provided
+                    $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
+                    $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                    // Fall back to dateRange (already computed) if not provided
+                    if (!$from) {
+                        $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                    }
+                    if (!$to) {
+                        $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                    }
+                    $planDateRange = [$from, $to];
+                }
+
+                // Get all DailyUseWh data for the plan_date
+                $dailyUseQuery = DailyUseWh::whereNotNull('partno');
+
+                if ($useExactPlanDate) {
+                    $dailyUseQuery->where('plan_date', $planDateParsed);
+                } elseif ($planDateRange) {
+                    $dailyUseQuery->whereBetween('plan_date', $planDateRange);
+                }
+
+                $dailyUseData = $dailyUseQuery->get();
+
+                if ($dailyUseData->isNotEmpty()) {
+                    // Get all partno and their group_type_desc from StockByWh
+                    // Use the same base query to ensure consistency
+                    $stockQuery = $connection
+                        ? DB::connection($connection)->table($tableName . ' as s')
+                        : DB::table($tableName . ' as s');
+
+                    $stockQuery->where('s.warehouse', $warehouse)
+                        ->whereNotNull('s.group_type_desc');
+
+                    if ($snapshotDate) {
+                        $stockQuery->where('s.snapshot_date', $snapshotDate);
+                    }
+
+                    // Apply same filters as baseQuery
+                    if ($search) {
+                        $stockQuery->where(function ($q) use ($search) {
+                            $q->where('s.partno', 'LIKE', "%{$search}%")
+                                ->orWhere('s.partname', 'LIKE', "%{$search}%")
+                                ->orWhereRaw('s.[desc] LIKE ?', ["%{$search}%"])
+                                ->orWhere('s.group_type_desc', 'LIKE', "%{$search}%");
+                        });
+                    }
+
+                    if ($request->has('customer')) {
+                        $stockQuery->where('s.customer', $request->customer);
+                    }
+
+                    $stockItems = $stockQuery->select('s.partno', 's.group_type_desc')
+                        ->distinct()
+                        ->get();
+
+                    // Build mapping: partno (as string) -> array of group_type_desc
+                    $partnoGroupMap = [];
+                    foreach ($stockItems as $item) {
+                        // Convert partno to string for consistent matching
+                        $partno = trim((string) $item->partno);
+                        if ($partno !== '') {
+                            if (!isset($partnoGroupMap[$partno])) {
+                                $partnoGroupMap[$partno] = [];
+                            }
+                            if (!in_array($item->group_type_desc, $partnoGroupMap[$partno])) {
+                                $partnoGroupMap[$partno][] = $item->group_type_desc;
+                            }
+                        }
+                    }
+
+                    // Calculate total daily_use per group_type_desc
+                    $groupDailyUseMap = [];
+                    foreach ($dailyUseData as $dailyUseItem) {
+                        // Convert partno to string for matching
+                        $partno = trim((string) ($dailyUseItem->partno ?? ''));
+                        $dailyUse = (int) ($dailyUseItem->daily_use ?? 0);
+
+                        // Default to 0 if daily_use is null or invalid
+                        if ($dailyUse < 0) {
+                            $dailyUse = 0;
+                        }
+
+                        if ($partno !== '' && isset($partnoGroupMap[$partno])) {
+                            foreach ($partnoGroupMap[$partno] as $groupTypeDesc) {
+                                if (!isset($groupDailyUseMap[$groupTypeDesc])) {
+                                    $groupDailyUseMap[$groupTypeDesc] = 0;
+                                }
+                                $groupDailyUseMap[$groupTypeDesc] += $dailyUse;
+                            }
+                        }
+                    }
+
+                    // Calculate estimatedConsumption and store daily_use for each group_type_desc in the result
+                    foreach ($data as $item) {
+                        $groupTypeDesc = $item->group_type_desc;
+                        $totalOnhand = (float) ($item->total_onhand ?? 0);
+                        $totalDailyUse = (float) ($groupDailyUseMap[$groupTypeDesc] ?? 0);
+
+                        // Store daily_use
+                        $dailyUseMap[$groupTypeDesc] = $totalDailyUse;
+
+                        // Calculate estimatedConsumption
+                        if ($totalDailyUse > 0) {
+                            $estimatedConsumption = round($totalOnhand / $totalDailyUse, 2);
+                        } else {
+                            $estimatedConsumption = 0;
+                        }
+
+                        $estimatedConsumptionMap[$groupTypeDesc] = $estimatedConsumption;
+                    }
+                }
+            } catch (\Exception $e) {
+                // If plan_date parsing fails, skip estimatedConsumption calculation
+                // Log error if needed: \Log::error('Stock Use Planning error: ' . $e->getMessage());
+            }
+        }
+
+        // Add estimatedConsumption and daily_use to each item
+        $data = $data->map(function ($item) use ($estimatedConsumptionMap, $dailyUseMap) {
+            $item->estimatedConsumption = (float) ($estimatedConsumptionMap[$item->group_type_desc] ?? 0);
+            $item->daily_use = (float) ($dailyUseMap[$item->group_type_desc] ?? 0);
+            return $item;
+        });
+
         return response()->json([
             'data' => $data,
             'filters' => [
                 'warehouse' => $warehouse,
                 'status' => $statusFilter,
                 'search' => $search,
-                'customer' => $request->input('customer')
+                'customer' => $request->input('customer'),
+                'plan_date' => $planDate,
+                'plan_date_range' => $usePlanDateRange ? ($planDateRange ?? null) : null
             ],
             'snapshot_date' => $snapshotDate,
             'date_range' => $dateRange,
