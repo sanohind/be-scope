@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\WarehouseStockSummary;
+use App\Models\StockByWhSnapshot;
+use App\Models\InventoryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\DB;
@@ -110,9 +112,9 @@ class DailyStockController extends Controller
     /**
      * Get database driver name
      */
-    private function getDatabaseDriver(): string
+    private function getDatabaseDriver(?string $connection = null): string
     {
-        return DB::connection()->getDriverName();
+        return DB::connection($connection)->getDriverName();
     }
 
     /**
@@ -145,6 +147,75 @@ class DailyStockController extends Controller
                 'monthly' => "DATE_FORMAT(period_start, '%Y-%m')",
                 'yearly' => "CAST(YEAR(period_start) AS CHAR)",
                 default => "DATE(period_start)",
+            };
+        }
+    }
+
+    /**
+     * Get date format expression for snapshot_date based on period and database driver
+     */
+    private function getSnapshotDateFormatByPeriod(string $period): string
+    {
+        $driver = $this->getDatabaseDriver();
+
+        if ($driver === 'mysql' || $driver === 'mariadb') {
+            // MySQL/MariaDB syntax
+            return match($period) {
+                'daily' => "DATE(snapshot_date)",
+                'monthly' => "DATE_FORMAT(snapshot_date, '%Y-%m')",
+                'yearly' => "CAST(YEAR(snapshot_date) AS CHAR)",
+                default => "DATE(snapshot_date)",
+            };
+        } elseif ($driver === 'sqlsrv') {
+            // SQL Server syntax
+            return match($period) {
+                'daily' => "CAST(snapshot_date AS DATE)",
+                'monthly' => "FORMAT(snapshot_date, 'yyyy-MM')",
+                'yearly' => "FORMAT(snapshot_date, 'yyyy')",
+                default => "CAST(snapshot_date AS DATE)",
+            };
+        } else {
+            // Default to MySQL syntax for other databases
+            return match($period) {
+                'daily' => "DATE(snapshot_date)",
+                'monthly' => "DATE_FORMAT(snapshot_date, '%Y-%m')",
+                'yearly' => "CAST(YEAR(snapshot_date) AS CHAR)",
+                default => "DATE(snapshot_date)",
+            };
+        }
+    }
+
+    /**
+     * Get date format expression for trans_date2 based on period and database driver
+     */
+    private function getTransDateFormatByPeriod(string $period): string
+    {
+        // Use 'erp' connection since InventoryTransaction uses it
+        $driver = $this->getDatabaseDriver('erp');
+
+        if ($driver === 'mysql' || $driver === 'mariadb') {
+            // MySQL/MariaDB syntax
+            return match($period) {
+                'daily' => "DATE(trans_date2)",
+                'monthly' => "DATE_FORMAT(trans_date2, '%Y-%m')",
+                'yearly' => "CAST(YEAR(trans_date2) AS CHAR)",
+                default => "DATE(trans_date2)",
+            };
+        } elseif ($driver === 'sqlsrv') {
+            // SQL Server syntax
+            return match($period) {
+                'daily' => "CAST(trans_date2 AS DATE)",
+                'monthly' => "FORMAT(trans_date2, 'yyyy-MM')",
+                'yearly' => "FORMAT(trans_date2, 'yyyy')",
+                default => "CAST(trans_date2 AS DATE)",
+            };
+        } else {
+            // Default to MySQL syntax for other databases
+            return match($period) {
+                'daily' => "DATE(trans_date2)",
+                'monthly' => "DATE_FORMAT(trans_date2, '%Y-%m')",
+                'yearly' => "CAST(YEAR(trans_date2) AS CHAR)",
+                default => "DATE(trans_date2)",
             };
         }
     }
@@ -195,29 +266,120 @@ class DailyStockController extends Controller
         // For monthly and yearly, always aggregate from daily data
         $queryGranularity = $period === 'daily' ? 'daily' : 'daily';
 
-        $query = WarehouseStockSummary::query()
+        // Get date format for StockByWhSnapshot (using snapshot_date instead of period_start)
+        $snapshotDateFormat = $this->getSnapshotDateFormatByPeriod($period);
+
+        // Query 1: Get onhand from StockByWhSnapshot
+        $onhandRecords = StockByWhSnapshot::query()
             ->whereIn('warehouse', $warehousesToQuery)
-            ->where('granularity', $queryGranularity)
-            ->whereBetween('period_start', [
+            ->whereBetween('snapshot_date', [
                 $dateRange['date_from_carbon']->startOfDay(),
                 $dateRange['date_to_carbon']->endOfDay()
-            ]);
-
-        $records = $query
+            ])
             ->selectRaw("
-                {$dateFormat} as period_key,
+                {$snapshotDateFormat} as period_key,
                 warehouse,
-                MIN(period_start) as period_start,
-                MAX(period_end) as period_end,
-                '{$period}' as granularity,
-                SUM(onhand_total) as onhand_total,
-                SUM(receipt_total) as receipt_total,
-                SUM(issue_total) as issue_total
+                SUM(onhand) as onhand_total
             ")
-            ->groupByRaw("{$dateFormat}, warehouse")
-            ->orderBy('warehouse')
-            ->orderByRaw($dateFormat)
-            ->get();
+            ->groupByRaw("{$snapshotDateFormat}, warehouse")
+            ->get()
+            ->keyBy(function($item) {
+                return $item->warehouse . '|' . trim($item->period_key);
+            });
+
+        // Get date format for InventoryTransaction (using trans_date2)
+        $transDateFormat = $this->getTransDateFormatByPeriod($period);
+
+        // Query 2: Get receipt from InventoryTransaction (trans_type = 'Receipt')
+        $receiptRecords = InventoryTransaction::query()
+            ->whereIn('warehouse', $warehousesToQuery)
+            ->where('trans_type', 'Receipt')
+            ->whereBetween('trans_date2', [
+                $dateRange['date_from_carbon']->startOfDay(),
+                $dateRange['date_to_carbon']->endOfDay()
+            ])
+            ->selectRaw("
+                {$transDateFormat} as period_key,
+                warehouse,
+                SUM(qty) as receipt_total
+            ")
+            ->groupByRaw("{$transDateFormat}, warehouse")
+            ->get()
+            ->keyBy(function($item) {
+                return $item->warehouse . '|' . trim($item->period_key);
+            });
+
+        // Query 3: Get issue from InventoryTransaction (trans_type = 'Issue')
+        $issueRecords = InventoryTransaction::query()
+            ->whereIn('warehouse', $warehousesToQuery)
+            ->where('trans_type', 'Issue')
+            ->whereBetween('trans_date2', [
+                $dateRange['date_from_carbon']->startOfDay(),
+                $dateRange['date_to_carbon']->endOfDay()
+            ])
+            ->selectRaw("
+                {$transDateFormat} as period_key,
+                warehouse,
+                SUM(qty) as issue_total
+            ")
+            ->groupByRaw("{$transDateFormat}, warehouse")
+            ->get()
+            ->keyBy(function($item) {
+                return $item->warehouse . '|' . trim($item->period_key);
+            });
+
+        // Combine all data by creating a unified collection
+        // Get all unique period_key + warehouse combinations
+        $allKeys = collect($onhandRecords->keys())
+            ->merge($receiptRecords->keys())
+            ->merge($issueRecords->keys())
+            ->unique();
+
+        $records = $allKeys->map(function($key) use ($onhandRecords, $receiptRecords, $issueRecords, $period, $dateRange) {
+            [$warehouse, $periodKey] = explode('|', $key);
+            
+            // Clean up period_key - trim whitespace
+            $periodKey = trim($periodKey);
+            $warehouse = trim($warehouse);
+            
+            // Recreate key with trimmed values
+            $cleanKey = $warehouse . '|' . $periodKey;
+            
+            $onhandData = $onhandRecords->get($cleanKey);
+            $receiptData = $receiptRecords->get($cleanKey);
+            $issueData = $issueRecords->get($cleanKey);
+
+            // Determine period_start and period_end based on period_key
+            try {
+                $periodDate = match($period) {
+                    'daily' => Carbon::parse($periodKey),
+                    'monthly' => Carbon::createFromFormat('Y-m', trim($periodKey))->startOfMonth(),
+                    'yearly' => Carbon::createFromFormat('Y', trim($periodKey))->startOfYear(),
+                    default => Carbon::parse($periodKey),
+                };
+            } catch (\Exception $e) {
+                // If parsing fails, use a default date from the range
+                $periodDate = $dateRange['date_from_carbon']->copy();
+            }
+
+            return (object) [
+                'period_key' => $periodKey,
+                'warehouse' => $warehouse,
+                'period_start' => $periodDate->startOfDay(),
+                'period_end' => match($period) {
+                    'daily' => $periodDate->copy()->endOfDay(),
+                    'monthly' => $periodDate->copy()->endOfMonth()->endOfDay(),
+                    'yearly' => $periodDate->copy()->endOfYear()->endOfDay(),
+                    default => $periodDate->copy()->endOfDay(),
+                },
+                'granularity' => $period,
+                'onhand_total' => $onhandData ? (int)$onhandData->onhand_total : 0,
+                'receipt_total' => $receiptData ? (int)$receiptData->receipt_total : 0,
+                'issue_total' => $issueData ? (int)$issueData->issue_total : 0,
+            ];
+        })
+            ->sortBy('warehouse')
+            ->sortBy('period_key');
 
         // Generate all periods in range for filling missing dates
         $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);

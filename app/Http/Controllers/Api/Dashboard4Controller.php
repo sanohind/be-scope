@@ -101,6 +101,44 @@ class Dashboard4Controller extends ApiController
     }
 
     /**
+     * Get default date range based on period type
+     * - daily: last 7 days
+     * - monthly: current month
+     * - yearly: current year
+     */
+    private function getDefaultDateRangeByPeriod(Request $request): array
+    {
+        $period = $request->get('period', $request->get('group_by', 'monthly'));
+        
+        // Validate period
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
+            $period = 'monthly';
+        }
+
+        switch ($period) {
+            case 'daily':
+                // Default: last 7 days for daily view
+                return [
+                    'start' => now()->subDays(6)->startOfDay(),
+                    'end' => now()->endOfDay()
+                ];
+            case 'yearly':
+                // Default: current year for yearly view
+                return [
+                    'start' => now()->startOfYear(),
+                    'end' => now()->endOfDay()
+                ];
+            case 'monthly':
+            default:
+                // Default: current month for monthly view
+                return [
+                    'start' => now()->startOfMonth(),
+                    'end' => now()->endOfDay()
+                ];
+        }
+    }
+
+    /**
      * Build a query for the given date range, falling back to the alternate source when no data exists.
      */
     private function buildRangeQueryWithFallback(string $preferredModel, Carbon $start, Carbon $end)
@@ -129,24 +167,15 @@ class Dashboard4Controller extends ApiController
      * Chart 4.1: Sales Overview KPI - KPI Cards
      *
      * Query Parameters:
-     * - year: Year to display (default: latest data year)
-     * - month: Month to display (default: latest data month)
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (invoice_date) - default: start of current month
+     * - date_to: End date filter (invoice_date) - default: today
      */
     public function salesOverviewKpi(Request $request): JsonResponse
     {
+        // Set default date range to current month
         $defaultStart = now()->startOfMonth();
         $defaultEnd = now();
-
-        if ($request->has('year') || $request->has('month')) {
-            $targetYear = (int) $request->get('year', now()->year);
-            $targetMonth = (int) $request->get('month', now()->month);
-            $defaultStart = Carbon::create($targetYear, $targetMonth, 1)->startOfMonth();
-            $defaultEnd = $defaultStart->copy()->endOfMonth();
-
-            if ($defaultStart->isSameMonth(now())) {
-                $defaultEnd = now();
-            }
-        }
 
         $range = $this->ensureDateRange($request, $defaultStart, $defaultEnd);
         $year = (int) $range['from']->year;
@@ -169,20 +198,43 @@ class Dashboard4Controller extends ApiController
                 $range['from']->toDateString(),
                 $range['to']->toDateString()
             ])
-            ->where('shipment_status', ['Approved', 'Released']);
+            ->whereIn('shipment_status', ['Approved', 'Released']);
         $outstandingInvoices = $outstandingInvoicesQuery
             ->distinct('shipment')
             ->count('shipment');
 
-        $prevStart = $range['from']->copy()->subMonth()->startOfMonth();
-        $prevEnd = $prevStart->copy()->endOfMonth();
+
+        // Calculate previous period for growth comparison (period-aware)
+        $period = $request->get('period', 'monthly');
+        
+        // Calculate previous period based on current period type
+        if ($period === 'yearly') {
+            // For yearly: compare with same range in previous year
+            $prevStart = $range['from']->copy()->subYear();
+            $prevEnd = $range['to']->copy()->subYear();
+        } elseif ($period === 'daily') {
+            // For daily: compare with same number of days in previous period
+            $daysDiff = $range['from']->diffInDays($range['to']);
+            $prevEnd = $range['from']->copy()->subDay();
+            $prevStart = $prevEnd->copy()->subDays($daysDiff);
+        } else {
+            // For monthly (default): compare with previous month
+            $prevStart = $range['from']->copy()->subMonth()->startOfMonth();
+            $prevEnd = $prevStart->copy()->endOfMonth();
+            
+            // If current period is partial month, use same day range in previous month
+            if (!$range['to']->isLastOfMonth() && $range['from']->isStartOfMonth()) {
+                $prevEnd = $prevStart->copy()->addDays($range['from']->diffInDays($range['to']));
+            }
+        }
+        
         $prevModel = $this->getModelByYear($prevStart->year);
-        $previousMonthQuery = $this->buildRangeQueryWithFallback(
+        $previousPeriodQuery = $this->buildRangeQueryWithFallback(
             $prevModel,
             $prevStart,
             $prevEnd
         );
-        $previousSalesAmount = (clone $previousMonthQuery)->sum('amount_hc');
+        $previousSalesAmount = (clone $previousPeriodQuery)->sum('amount_hc');
 
         $salesGrowth = $previousSalesAmount > 0
             ? round((($totalSalesAmount - $previousSalesAmount) / $previousSalesAmount) * 100, 2)
@@ -194,12 +246,12 @@ class Dashboard4Controller extends ApiController
             'total_invoices' => $totalInvoices,
             'outstanding_invoices' => $outstandingInvoices,
             'sales_growth' => $salesGrowth,
-            'period' => sprintf('%04d-%02d', $year, $month),
-            'month' => Carbon::create($year, $month, 1)->format('F Y'),
-            'date_range' => [
-                'from' => $range['from']->toDateString(),
-                'to' => $range['to']->toDateString(),
+            'previous_period' => [
+                'from' => $prevStart->toDateString(),
+                'to' => $prevEnd->toDateString(),
+                'sales_amount' => $previousSalesAmount
             ],
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
         ]);
     }
 
@@ -222,6 +274,10 @@ class Dashboard4Controller extends ApiController
         if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
             $period = 'monthly';
         }
+
+        // Get default date range based on period
+        $defaults = $this->getDefaultDateRangeByPeriod($request);
+        $this->ensureDateRange($request, $defaults['start'], $defaults['end']);
 
         $query = $this->getQueryForDateRange($request);
 
@@ -264,7 +320,12 @@ class Dashboard4Controller extends ApiController
     public function topCustomersByRevenue(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 20);
-        $this->ensureDateRange($request);
+        
+        // Set default date range to current month
+        $defaultStart = now()->startOfMonth();
+        $defaultEnd = now();
+        
+        $this->ensureDateRange($request, $defaultStart, $defaultEnd);
         $query = $this->getQueryForDateRange($request);
 
         // Apply date range filter
@@ -300,11 +361,19 @@ class Dashboard4Controller extends ApiController
 
     /**
      * Chart 4.4: Sales by Product Type - Donut Chart
-     * Shows revenue for the current month only
+     * 
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (invoice_date) - default: start of current month
+     * - date_to: End date filter (invoice_date) - default: today
      */
     public function salesByProductType(Request $request): JsonResponse
     {
-        $range = $this->ensureDateRange($request);
+        // Set default date range to current month
+        $defaultStart = now()->startOfMonth();
+        $defaultEnd = now();
+        
+        $range = $this->ensureDateRange($request, $defaultStart, $defaultEnd);
         $query = $this->getQueryForDateRange($request);
 
         $data = $query->select('product_type')
@@ -331,10 +400,7 @@ class Dashboard4Controller extends ApiController
         return response()->json([
             'data' => $data,
             'total_revenue' => $totalRevenue,
-            'date_range' => [
-                'from' => $range['from']->toDateString(),
-                'to' => $range['to']->toDateString(),
-            ],
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
         ]);
     }
 
@@ -342,15 +408,35 @@ class Dashboard4Controller extends ApiController
      * Chart 4.5: Shipment Status Tracking - Bar Chart
      * Shows distinct counts for each stage of the sales process
      * Note: Receipt data only available in ERP database (SoInvoiceLine)
+     * 
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (invoice_date) - default: start of current month
+     * - date_to: End date filter (invoice_date) - default: today
      */
-    public function shipmentStatusTracking(): JsonResponse
+    public function shipmentStatusTracking(Request $request): JsonResponse
     {
-        // Use SoInvoiceLine (ERP) for complete data including receipt information
-        $salesOrdersCreated = SoInvoiceLine::distinct('sales_order')->count('sales_order');
-        $shipmentsGenerated = SoInvoiceLine::distinct('shipment')->count('shipment');
-        $receiptsConfirmed = SoInvoiceLine::distinct('receipt')->count('receipt');
-        $invoicesIssued = SoInvoiceLine::distinct('invoice_no')->count('invoice_no');
-        $invoicesPosted = SoInvoiceLine::where('invoice_status', 'Posted')
+        // Set default date range to current month
+        $defaultStart = now()->startOfMonth();
+        $defaultEnd = now();
+        
+        $range = $this->ensureDateRange($request, $defaultStart, $defaultEnd);
+        $year = (int) $range['from']->year;
+        $model = $this->getModelByYear($year);
+        
+        // Build base query with date range
+        $baseQuery = $model::query()
+            ->whereBetween('invoice_date', [
+                $range['from']->toDateString(),
+                $range['to']->toDateString()
+            ]);
+
+        $salesOrdersCreated = (clone $baseQuery)->distinct('sales_order')->count('sales_order');
+        $shipmentsGenerated = (clone $baseQuery)->distinct('shipment')->count('shipment');
+        $receiptsConfirmed = (clone $baseQuery)->distinct('receipt')->count('receipt');
+        $invoicesIssued = (clone $baseQuery)->distinct('invoice_no')->count('invoice_no');
+        $invoicesPosted = (clone $baseQuery)
+            ->where('invoice_status', 'Posted')
             ->distinct('invoice_no')
             ->count('invoice_no');
 
@@ -376,33 +462,50 @@ class Dashboard4Controller extends ApiController
                     'stage' => 'Invoices Posted',
                     'count' => $invoicesPosted
                 ]
-            ]
+            ],
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
         ]);
     }
 
     /**
      * Chart 4.7: Delivery Performance - Gauge Chart
      * Note: Using invoice_date vs delivery_date comparison (receipt_date not available in ERP2)
+     * 
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (invoice_date) - default: start of current month
+     * - date_to: End date filter (invoice_date) - default: today
      */
-    public function deliveryPerformance(): JsonResponse
+    public function deliveryPerformance(Request $request): JsonResponse
     {
-        // Default to SoInvoiceLine2 for historical aggregate data
-        $totalDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
+        // Set default date range to current month
+        $defaultStart = now()->startOfMonth();
+        $defaultEnd = now();
+        
+        $range = $this->ensureDateRange($request, $defaultStart, $defaultEnd);
+        $year = (int) $range['from']->year;
+        $model = $this->getModelByYear($year);
+        
+        // Build base query with date range
+        $baseQuery = $model::query()
+            ->whereNotNull('invoice_date')
             ->whereNotNull('delivery_date')
-            ->count();
+            ->whereBetween('invoice_date', [
+                $range['from']->toDateString(),
+                $range['to']->toDateString()
+            ]);
 
-        $earlyDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
-            ->whereNotNull('delivery_date')
+        $totalDeliveries = (clone $baseQuery)->count();
+
+        $earlyDeliveries = (clone $baseQuery)
             ->whereRaw('invoice_date < delivery_date')
             ->count();
 
-        $onTimeDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
-            ->whereNotNull('delivery_date')
+        $onTimeDeliveries = (clone $baseQuery)
             ->whereRaw('invoice_date = delivery_date')
             ->count();
 
-        $lateDeliveries = SoInvoiceLine2::whereNotNull('invoice_date')
-            ->whereNotNull('delivery_date')
+        $lateDeliveries = (clone $baseQuery)
             ->whereRaw('invoice_date > delivery_date')
             ->count();
 
@@ -424,7 +527,8 @@ class Dashboard4Controller extends ApiController
             'on_time_delivery_percentage' => $onTimePercentage,
             'late_delivery_percentage' => $latePercentage,
             'total_deliveries' => $totalDeliveries,
-            'target' => 95
+            'target' => 95,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
         ]);
     }
 
@@ -452,6 +556,13 @@ class Dashboard4Controller extends ApiController
     public function invoiceStatusDistribution(Request $request): JsonResponse
     {
         $groupBy = $request->get('group_by', 'monthly');
+        
+        // Get default date range based on period (if groupBy is not 'customer')
+        if ($groupBy !== 'customer') {
+            $defaults = $this->getDefaultDateRangeByPeriod($request);
+            $this->ensureDateRange($request, $defaults['start'], $defaults['end']);
+        }
+        
         $query = $this->getQueryForDateRange($request);
 
         // Apply date range filter
@@ -486,11 +597,11 @@ class Dashboard4Controller extends ApiController
 
     /**
      * Chart 4.7: Sales Order Fulfillment - Bar Chart
-     * Shows delivered quantity with monthly and yearly filter options
+     * Shows delivered quantity with daily, monthly and yearly filter options
      * Data split: Aug 2025+ from ERP (SoInvoiceLine), before Aug 2025 from ERP2 (SoInvoiceLine2)
      *
      * Query Parameters:
-     * - period: Filter by period (monthly, yearly) - default: monthly
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
      * - date_from: Start date filter (invoice_date)
      * - date_to: End date filter (invoice_date)
      * - product_type: Filter by product type
@@ -500,14 +611,18 @@ class Dashboard4Controller extends ApiController
     {
         $period = $request->get('period', 'monthly');
 
-        // Validate period - only monthly and yearly allowed
-        if (!in_array($period, ['monthly', 'yearly'])) {
+        // Validate period - daily, monthly and yearly allowed
+        if (!in_array($period, ['daily', 'monthly', 'yearly'])) {
             $period = 'monthly';
         }
 
-        // Determine date range - default to current year if not specified
-        $dateTo = $request->get('date_to', date('Y-12-31'));
-        $dateFrom = $request->get('date_from', date('Y-01-01'));
+        // Get default date range based on period
+        $defaults = $this->getDefaultDateRangeByPeriod($request);
+        $this->ensureDateRange($request, $defaults['start'], $defaults['end']);
+
+        // Get date range from request (now guaranteed to exist)
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
 
         $allData = collect();
 
@@ -533,14 +648,13 @@ class Dashboard4Controller extends ApiController
 
             $erp2EndDate = $toDate->lt($splitDate) ? $toDate : $splitDate->copy()->subDay();
 
-            $isSqlServer2 = $query2->getConnection()->getDriverName() === 'sqlsrv';
-            $dateFormat2 = $period === 'yearly'
-                ? ($isSqlServer2 ? "CAST(YEAR(invoice_date) AS VARCHAR)" : "YEAR(invoice_date)")
-                : ($isSqlServer2 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)" : "DATE_FORMAT(invoice_date, '%Y-%m')");
+            // Use helper method for date format
+            $dateFormat2 = $this->getDateFormatByPeriod($period, 'invoice_date', $query2);
 
             $erp2Data = $query2
                 ->selectRaw("$dateFormat2 as period")
                 ->selectRaw('SUM(delivered_qty) as delivered_qty')
+                ->selectRaw('SUM(invoice_qty) as invoice_qty')
                 ->where('invoice_date', '>=', $fromDate->format('Y-m-d'))
                 ->where('invoice_date', '<=', $erp2EndDate->format('Y-m-d'))
                 ->groupByRaw($dateFormat2)
@@ -557,14 +671,13 @@ class Dashboard4Controller extends ApiController
 
             $erp1StartDate = $fromDate->gte($splitDate) ? $fromDate : $splitDate;
 
-            $isSqlServer1 = $query1->getConnection()->getDriverName() === 'sqlsrv';
-            $dateFormat1 = $period === 'yearly'
-                ? ($isSqlServer1 ? "CAST(YEAR(invoice_date) AS VARCHAR)" : "YEAR(invoice_date)")
-                : ($isSqlServer1 ? "LEFT(CONVERT(VARCHAR(10), invoice_date, 23), 7)" : "DATE_FORMAT(invoice_date, '%Y-%m')");
+            // Use helper method for date format
+            $dateFormat1 = $this->getDateFormatByPeriod($period, 'invoice_date', $query1);
 
             $erp1Data = $query1
                 ->selectRaw("$dateFormat1 as period")
                 ->selectRaw('SUM(delivered_qty) as delivered_qty')
+                ->selectRaw('SUM(invoice_qty) as invoice_qty')
                 ->where('invoice_date', '>=', $erp1StartDate->format('Y-m-d'))
                 ->where('invoice_date', '<=', $toDate->format('Y-m-d'))
                 ->groupByRaw($dateFormat1)
@@ -574,27 +687,56 @@ class Dashboard4Controller extends ApiController
             $allData = $allData->merge($erp1Data);
         }
 
-        // Sort and merge data by period
-        $sortedData = $allData->sortBy('period')->values();
+        // Normalize period format to string and merge duplicates
+        $mergedData = $allData->groupBy(function ($item) {
+            // Normalize period to string for consistent grouping
+            return (string) $item->period;
+        })->map(function ($group) {
+            // Sum delivered_qty and invoice_qty for items with same period
+            $totalDeliveredQty = $group->sum(function ($item) {
+                return (float) $item->delivered_qty;
+            });
+            
+            $totalInvoiceQty = $group->sum(function ($item) {
+                return (float) $item->invoice_qty;
+            });
+            
+            return [
+                'period' => (string) $group->first()->period,
+                'delivered_qty' => number_format($totalDeliveredQty, 1, '.', ''),
+                'invoice_qty' => number_format($totalInvoiceQty, 1, '.', '')
+            ];
+        })->values();
+
+        // Sort by period
+        $sortedData = $mergedData->sortBy('period')->values();
 
         return response()->json([
             'data' => $sortedData,
-            'filter_metadata' => [
-                'period' => $period,
-                'date_from' => $dateFrom,
-                'date_to' => $dateTo
-            ]
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
         ]);
     }
 
     /**
      * Chart 4.8: Top Selling Products - Data Table with Sparkline
+     * 
+     * Query Parameters:
+     * - limit: Number of records to return (default: 10)
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - product_type: Filter by product type
+     * - customer: Filter by customer (bp_name)
+     * - date_from: Start date filter (invoice_date) - default: start of current month
+     * - date_to: End date filter (invoice_date) - default: today
      */
     public function topSellingProducts(Request $request): JsonResponse
     {
         $limit = $request->get('limit', 10);
-        $this->ensureDateRange($request);
-
+        
+        // Set default date range to current month
+        $defaultStart = now()->startOfMonth();
+        $defaultEnd = now();
+        
+        $this->ensureDateRange($request, $defaultStart, $defaultEnd);
         $query = $this->getQueryForDateRange($request);
 
         // Apply filters
@@ -604,10 +746,9 @@ class Dashboard4Controller extends ApiController
         if ($request->has('customer')) {
             $query->where('bp_name', $request->customer);
         }
-        $query->whereBetween('invoice_date', [
-            $request->get('date_from'),
-            $request->get('date_to'),
-        ]);
+        
+        // Apply date range filter
+        $this->applyDateRangeFilter($query, $request, 'invoice_date');
 
         $data = $query->select('part_no', 'old_partno', 'cust_partname')
             ->selectRaw('SUM(delivered_qty) as total_qty_sold')
@@ -625,31 +766,38 @@ class Dashboard4Controller extends ApiController
             return $item;
         });
 
-        return response()->json($data);
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
+        ]);
     }
 
     /**
      * Chart 4.9: Revenue by Currency - Pie Chart
-     * Shows revenue for the current month only
+     * 
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (invoice_date) - default: start of current month
+     * - date_to: End date filter (invoice_date) - default: today
      */
-    public function revenueByCurrency(): JsonResponse
+    public function revenueByCurrency(Request $request): JsonResponse
     {
-        // Get current year and month
-        $now = now();
-        $currentYear = $now->year;
-        $currentMonth = $now->month;
-
-        // Use appropriate model based on current year
-        $model = $this->getModelByYear($currentYear);
-
-        $actualMonth = $currentMonth - 1;
+        // Set default date range to current month
+        $defaultStart = now()->startOfMonth();
+        $defaultEnd = now();
+        
+        $range = $this->ensureDateRange($request, $defaultStart, $defaultEnd);
+        $year = (int) $range['from']->year;
+        $model = $this->getModelByYear($year);
 
         $data = $model::select('currency')
             ->selectRaw('SUM(amount) as amount_original')
             ->selectRaw('SUM(amount_hc) as amount_hc')
             ->selectRaw('COUNT(DISTINCT invoice_no) as invoice_count')
-            ->whereYear('invoice_date', $currentYear)
-            ->whereMonth('invoice_date', $actualMonth)
+            ->whereBetween('invoice_date', [
+                $range['from']->toDateString(),
+                $range['to']->toDateString()
+            ])
             ->groupBy('currency')
             ->orderBy('amount_hc', 'desc')
             ->get();
@@ -667,7 +815,7 @@ class Dashboard4Controller extends ApiController
         return response()->json([
             'data' => $data,
             'total_amount_hc' => $totalAmountHc,
-            'period' => sprintf('%04d-%02d', $currentYear, $actualMonth)
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
         ]);
     }
 
@@ -759,8 +907,24 @@ class Dashboard4Controller extends ApiController
             $allData = $allData->merge($erp1Data);
         }
 
+        // Normalize period format to string and merge duplicates
+        $mergedData = $allData->groupBy(function ($item) {
+            // Normalize period to string for consistent grouping
+            return (string) $item->period;
+        })->map(function ($group) {
+            // Sum revenue for items with same period
+            $totalRevenue = $group->sum(function ($item) {
+                return (float) $item->revenue;
+            });
+            
+            return (object) [
+                'period' => (string) $group->first()->period,
+                'revenue' => $totalRevenue
+            ];
+        })->values();
+
         // Sort data by period
-        $sortedData = $allData->sortBy('period')->values();
+        $sortedData = $mergedData->sortBy('period')->values();
 
         // Calculate MoM (Month-over-Month) growth
         $result = [];
@@ -786,8 +950,7 @@ class Dashboard4Controller extends ApiController
 
         return response()->json([
             'data' => $result,
-            'date_from' => $dateFrom,
-            'date_to' => $dateTo
+            'filter_metadata' => $this->getPeriodMetadata($request, 'invoice_date'),
         ]);
     }
 
@@ -801,12 +964,12 @@ class Dashboard4Controller extends ApiController
             'revenue_trend' => $this->revenueTrend($request)->getData(true),
             'top_customers_by_revenue' => $this->topCustomersByRevenue($request)->getData(true),
             'sales_by_product_type' => $this->salesByProductType($request)->getData(true),
-            'shipment_status_tracking' => $this->shipmentStatusTracking()->getData(true),
-            'delivery_performance' => $this->deliveryPerformance()->getData(true),
+            'shipment_status_tracking' => $this->shipmentStatusTracking($request)->getData(true),
+            'delivery_performance' => $this->deliveryPerformance($request)->getData(true),
             'invoice_status_distribution' => $this->invoiceStatusDistribution($request)->getData(true),
             'sales_order_fulfillment' => $this->salesOrderFulfillment($request)->getData(true),
             'top_selling_products' => $this->topSellingProducts($request)->getData(true),
-            'revenue_by_currency' => $this->revenueByCurrency()->getData(true),
+            'revenue_by_currency' => $this->revenueByCurrency($request)->getData(true),
             'monthly_sales_comparison' => $this->monthlySalesComparison($request)->getData(true)
         ]);
     }
