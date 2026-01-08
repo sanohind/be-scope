@@ -19,6 +19,6 @@ class ProductionPlan extends Model
     ];
 
     protected $casts = [
-        'plan_date' => 'date',
+        'plan_date' => 'date:Y-m-d',
     ];
 }
