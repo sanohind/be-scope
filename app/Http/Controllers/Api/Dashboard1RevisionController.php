@@ -283,6 +283,7 @@ class Dashboard1RevisionController extends ApiController
      * 6 metrics combining stock + transaction data
      * DATE FILTER: Applied to transaction metrics only
      * Uses snapshot data for historical stock view
+     * CRITICAL ITEMS: Based on estimatedConsumption (onhand / daily_use) <= 0
      */
     public function comprehensiveKpi(Request $request): JsonResponse
     {
@@ -306,7 +307,100 @@ class Dashboard1RevisionController extends ApiController
 
         $totalSku = (clone $stockQuery)->distinct()->count('partno');
         $totalOnhand = (clone $stockQuery)->sum('onhand');
-        $criticalItems = (clone $stockQuery)->whereRaw('onhand < safety_stock')->count();
+
+        // Critical Items Calculation based on estimatedConsumption
+        // Get plan_date parameters
+        $planDate = $request->input('plan_date');
+        $planDateFrom = $request->input('date_from');
+        $planDateTo = $request->input('date_to');
+        
+        $criticalItems = 0;
+        
+        // Determine plan_date filtering (exact or range)
+        $useExactPlanDate = !empty($planDate);
+        $usePlanDateRange = !$useExactPlanDate && ($planDateFrom || $planDateTo);
+        
+        if ($useExactPlanDate || $usePlanDateRange) {
+            try {
+                $planDateParsed = null;
+                $planDateRange = null;
+
+                if ($useExactPlanDate) {
+                    $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+                } elseif ($usePlanDateRange) {
+                    // Use date range when plan_date not provided
+                    $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
+                    $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                    // Fall back to dateRange if not provided
+                    if (!$from) {
+                        $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                    }
+                    if (!$to) {
+                        $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                    }
+                    $planDateRange = [$from, $to];
+                }
+
+                // Get DailyUseWh data for the plan_date
+                $dailyUseQuery = DailyUseWh::whereNotNull('partno');
+
+                if ($useExactPlanDate) {
+                    $dailyUseQuery->where('plan_date', $planDateParsed);
+                } elseif ($planDateRange) {
+                    $dailyUseQuery->whereBetween('plan_date', $planDateRange);
+                }
+
+                $dailyUseData = $dailyUseQuery->get();
+
+                if ($dailyUseData->isNotEmpty()) {
+                    // Get stock items with their partno and onhand
+                    $stockItems = (clone $stockQuery)
+                        ->select('partno', 'onhand')
+                        ->get();
+
+                    // Build mapping: partno -> onhand
+                    $partnoOnhandMap = [];
+                    foreach ($stockItems as $item) {
+                        $partno = trim((string) $item->partno);
+                        if ($partno !== '') {
+                            $partnoOnhandMap[$partno] = (float) ($item->onhand ?? 0);
+                        }
+                    }
+
+                    // Calculate critical items based on estimatedConsumption
+                    $partnoProcessed = [];
+                    foreach ($dailyUseData as $dailyUseItem) {
+                        $partno = trim((string) ($dailyUseItem->partno ?? ''));
+                        $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
+
+                        // Skip if already processed or invalid
+                        if ($partno === '' || isset($partnoProcessed[$partno])) {
+                            continue;
+                        }
+
+                        $partnoProcessed[$partno] = true;
+
+                        // Get onhand for this partno
+                        $onhand = $partnoOnhandMap[$partno] ?? 0;
+
+                        // Calculate estimatedConsumption
+                        if ($dailyUse > 0) {
+                            $estimatedConsumption = $onhand / $dailyUse;
+                        } else {
+                            $estimatedConsumption = 0;
+                        }
+
+                        // Count as critical if estimatedConsumption <= 0
+                        if ($estimatedConsumption <= 0) {
+                            $criticalItems++;
+                        }
+                    }
+                }
+            } catch (\Exception $e) {
+                // If plan_date parsing fails, critical items remains 0
+                // Log error if needed: \Log::error('Critical items calculation error: ' . $e->getMessage());
+            }
+        }
 
         // Transaction Metrics (with date filter)
         $transInPeriod = DB::connection('erp')->table('inventory_transaction')
@@ -354,12 +448,18 @@ class Dashboard1RevisionController extends ApiController
      * DATE FILTER: Applied to transaction counts
      * Uses snapshot data for historical stock view
      * Grouped by date (snapshot_date) with period filtering
+     * For RM warehouses (WHRM01, WHRM02, WHMT01): Uses estimatedConsumption logic
+     * For other warehouses: Uses traditional onhand-based logic
      */
     public function stockHealthDistribution(Request $request): JsonResponse
     {
         $warehouse = $this->getWarehouse($request);
         $period = $this->getPeriod($request);
         $dateRange = $this->getDateRange($request, 30, $period);
+
+        // Check if warehouse uses estimatedConsumption logic
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
+        $useEstimatedConsumption = in_array($warehouse, $rmWarehouses);
 
         // Detect database driver for proper date formatting
         $driver = $this->getDatabaseDriver();
@@ -407,105 +507,339 @@ class Dashboard1RevisionController extends ApiController
         // Build date filter for transaction join
         $dateFilter = $this->buildDateFilter('t', $dateRange);
 
-        $sql = "
-            SELECT
-                {$dateGrouping} as {$dateLabel},
-                CASE
-                    WHEN s.onhand < s.min_stock THEN 'Critical'
-                    WHEN s.onhand < s.safety_stock THEN 'Low Stock'
-                    WHEN s.onhand > s.max_stock THEN 'Overstock'
-                    ELSE 'Normal'
-                END as stock_status,
-                COUNT(DISTINCT s.partno) as item_count,
-                SUM(s.onhand) as total_onhand,
-                COUNT(t.trans_id) as trans_count,
-                COUNT(t.shipment) as total_shipment
-            FROM stock_by_wh_snapshots s
-            LEFT JOIN inventory_transaction t
-                ON s.partno = t.partno
-                AND s.warehouse = t.warehouse
-                AND {$dateFilter}
-            WHERE {$whereClause}
-            GROUP BY
-                {$dateGrouping},
-                CASE
-                    WHEN s.onhand < s.min_stock THEN 'Critical'
-                    WHEN s.onhand < s.safety_stock THEN 'Low Stock'
-                    WHEN s.onhand > s.max_stock THEN 'Overstock'
-                    ELSE 'Normal'
-                END
-            ORDER BY {$dateGrouping}
-        ";
+        if ($useEstimatedConsumption) {
+            // For RM warehouses: Use estimatedConsumption logic
+            // Get plan_date parameters
+            $planDate = $request->input('plan_date');
+            $planDateFrom = $request->input('date_from');
+            $planDateTo = $request->input('date_to');
 
-        $data = DB::select($sql, $params);
+            // Determine plan_date filtering (exact or range)
+            $useExactPlanDate = !empty($planDate);
+            $usePlanDateRange = !$useExactPlanDate && ($planDateFrom || $planDateTo);
 
-        // Group data by period for cleaner response
-        $groupedData = [];
-        foreach ($data as $row) {
-            $periodKey = $row->{$dateLabel};
-            // Normalize period key
-            $periodKey = trim((string) $periodKey);
-            if ($period === 'daily') {
-                try {
-                    $periodKey = Carbon::parse($periodKey)->format('Y-m-d');
-                } catch (\Exception $e) {
-                    // Keep original if parsing fails
+            if (!$useExactPlanDate && !$usePlanDateRange) {
+                // Default to dateRange if no plan_date provided
+                $planDateFrom = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                $planDateTo = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                $usePlanDateRange = true;
+            }
+
+            $planDateParsed = null;
+            $planDateRange = null;
+
+            if ($useExactPlanDate) {
+                $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+            } elseif ($usePlanDateRange) {
+                $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
+                $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                if (!$from) {
+                    $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
                 }
-            } elseif ($period === 'monthly') {
-                if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
-                    $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
-                } else {
+                if (!$to) {
+                    $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                }
+                $planDateRange = [$from, $to];
+            }
+
+            // Get DailyUseWh data
+            $dailyUseQuery = DailyUseWh::whereNotNull('partno');
+
+            if ($useExactPlanDate) {
+                $dailyUseQuery->where('plan_date', $planDateParsed);
+            } elseif ($planDateRange) {
+                $dailyUseQuery->whereBetween('plan_date', $planDateRange);
+            }
+
+            $dailyUseData = $dailyUseQuery->get();
+
+            // Build partno -> daily_use mapping
+            $partnoDailyUseMap = [];
+            foreach ($dailyUseData as $dailyUseItem) {
+                $partno = trim((string) ($dailyUseItem->partno ?? ''));
+                $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
+                if ($partno !== '') {
+                    if (!isset($partnoDailyUseMap[$partno])) {
+                        $partnoDailyUseMap[$partno] = 0;
+                    }
+                    $partnoDailyUseMap[$partno] += $dailyUse;
+                }
+            }
+
+            // Get stock data with partno and onhand
+            $sql = "
+                SELECT
+                    {$dateGrouping} as {$dateLabel},
+                    s.partno,
+                    s.onhand
+                FROM stock_by_wh_snapshots s
+                WHERE {$whereClause}
+                ORDER BY {$dateGrouping}
+            ";
+
+            $stockData = DB::select($sql, $params);
+
+            // Calculate stock status based on estimatedConsumption
+            $groupedData = [];
+            foreach ($stockData as $row) {
+                $periodKey = $row->{$dateLabel};
+                // Normalize period key
+                $periodKey = trim((string) $periodKey);
+                if ($period === 'daily') {
                     try {
-                        $parsed = Carbon::parse($periodKey);
-                        $periodKey = $parsed->format('Y-m');
+                        $periodKey = Carbon::parse($periodKey)->format('Y-m-d');
                     } catch (\Exception $e) {
                         // Keep original if parsing fails
                     }
+                } elseif ($period === 'monthly') {
+                    if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                        $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                    } else {
+                        try {
+                            $parsed = Carbon::parse($periodKey);
+                            $periodKey = $parsed->format('Y-m');
+                        } catch (\Exception $e) {
+                            // Keep original if parsing fails
+                        }
+                    }
+                } elseif ($period === 'yearly') {
+                    if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                        $periodKey = (string) intval($matches[1]);
+                    } else {
+                        $periodKey = (string) intval($periodKey);
+                    }
                 }
-            } elseif ($period === 'yearly') {
-                if (preg_match('/(\d{4})/', $periodKey, $matches)) {
-                    $periodKey = (string) intval($matches[1]);
+
+                $partno = trim((string) $row->partno);
+                $onhand = (float) ($row->onhand ?? 0);
+                $dailyUse = $partnoDailyUseMap[$partno] ?? 0;
+
+                // Calculate estimatedConsumption
+                if ($dailyUse > 0) {
+                    $estimatedConsumption = $onhand / $dailyUse;
                 } else {
-                    $periodKey = (string) intval($periodKey);
+                    $estimatedConsumption = 0;
+                }
+
+                // Determine stock status based on estimatedConsumption
+                if ($dailyUse === 0.0 && $estimatedConsumption === 0.0) {
+                    $stockStatus = 'Undefined';
+                } elseif ($estimatedConsumption <= 0) {
+                    $stockStatus = 'Critical';
+                } elseif ($estimatedConsumption <= 3) {
+                    $stockStatus = 'Low Stock';
+                } elseif ($estimatedConsumption <= 9) {
+                    $stockStatus = 'Normal';
+                } else {
+                    $stockStatus = 'Overstock';
+                }
+
+                if (!isset($groupedData[$periodKey])) {
+                    $groupedData[$periodKey] = [];
+                }
+                if (!isset($groupedData[$periodKey][$stockStatus])) {
+                    $groupedData[$periodKey][$stockStatus] = [
+                        'item_count' => 0,
+                        'total_onhand' => 0
+                    ];
+                }
+                $groupedData[$periodKey][$stockStatus]['item_count']++;
+                $groupedData[$periodKey][$stockStatus]['total_onhand'] += $onhand;
+            }
+
+            // Get transaction counts
+            $transactionSql = "
+                SELECT
+                    {$dateGrouping} as {$dateLabel},
+                    COUNT(t.trans_id) as trans_count,
+                    COUNT(t.shipment) as total_shipment
+                FROM stock_by_wh_snapshots s
+                LEFT JOIN inventory_transaction t
+                    ON s.partno = t.partno
+                    AND s.warehouse = t.warehouse
+                    AND {$dateFilter}
+                WHERE {$whereClause}
+                GROUP BY {$dateGrouping}
+                ORDER BY {$dateGrouping}
+            ";
+
+            $transactionData = DB::select($transactionSql, $params);
+
+            // Merge transaction data
+            $transactionMap = [];
+            foreach ($transactionData as $row) {
+                $periodKey = $row->{$dateLabel};
+                $periodKey = trim((string) $periodKey);
+                if ($period === 'daily') {
+                    try {
+                        $periodKey = Carbon::parse($periodKey)->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        // Keep original
+                    }
+                } elseif ($period === 'monthly') {
+                    if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                        $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                    } else {
+                        try {
+                            $parsed = Carbon::parse($periodKey);
+                            $periodKey = $parsed->format('Y-m');
+                        } catch (\Exception $e) {
+                            // Keep original
+                        }
+                    }
+                } elseif ($period === 'yearly') {
+                    if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                        $periodKey = (string) intval($matches[1]);
+                    } else {
+                        $periodKey = (string) intval($periodKey);
+                    }
+                }
+                $transactionMap[$periodKey] = [
+                    'trans_count' => $row->trans_count ?? 0,
+                    'total_shipment' => $row->total_shipment ?? 0
+                ];
+            }
+
+            // Format data for response
+            $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
+            $formattedData = [];
+
+            foreach ($allPeriods as $periodValue) {
+                $periodKeyStr = trim((string) $periodValue);
+                $periodData = [];
+
+                if (isset($groupedData[$periodKeyStr])) {
+                    foreach ($groupedData[$periodKeyStr] as $status => $stats) {
+                        $periodData[] = (object)[
+                            'stock_status' => $status,
+                            'item_count' => $stats['item_count'],
+                            'total_onhand' => round($stats['total_onhand'], 2),
+                            'trans_count' => $transactionMap[$periodKeyStr]['trans_count'] ?? 0,
+                            'total_shipment' => $transactionMap[$periodKeyStr]['total_shipment'] ?? 0
+                        ];
+                    }
+                }
+
+                $formattedData[] = [
+                    $dateLabel => $periodKeyStr,
+                    'data' => $periodData
+                ];
+            }
+
+            return response()->json([
+                'data' => $formattedData,
+                'date_range' => [
+                    'from' => $dateRange['date_from'],
+                    'to' => $dateRange['date_to']
+                ],
+                'period' => $period,
+                'grouping' => $dateLabel,
+                'calculation_method' => 'estimatedConsumption'
+            ]);
+
+        } else {
+            // For other warehouses: Use traditional logic
+            $sql = "
+                SELECT
+                    {$dateGrouping} as {$dateLabel},
+                    CASE
+                        WHEN s.onhand < s.min_stock THEN 'Critical'
+                        WHEN s.onhand < s.safety_stock THEN 'Low Stock'
+                        WHEN s.onhand > s.max_stock THEN 'Overstock'
+                        ELSE 'Normal'
+                    END as stock_status,
+                    COUNT(DISTINCT s.partno) as item_count,
+                    SUM(s.onhand) as total_onhand,
+                    COUNT(t.trans_id) as trans_count,
+                    COUNT(t.shipment) as total_shipment
+                FROM stock_by_wh_snapshots s
+                LEFT JOIN inventory_transaction t
+                    ON s.partno = t.partno
+                    AND s.warehouse = t.warehouse
+                    AND {$dateFilter}
+                WHERE {$whereClause}
+                GROUP BY
+                    {$dateGrouping},
+                    CASE
+                        WHEN s.onhand < s.min_stock THEN 'Critical'
+                        WHEN s.onhand < s.safety_stock THEN 'Low Stock'
+                        WHEN s.onhand > s.max_stock THEN 'Overstock'
+                        ELSE 'Normal'
+                    END
+                ORDER BY {$dateGrouping}
+            ";
+
+            $data = DB::select($sql, $params);
+
+            // Group data by period for cleaner response
+            $groupedData = [];
+            foreach ($data as $row) {
+                $periodKey = $row->{$dateLabel};
+                // Normalize period key
+                $periodKey = trim((string) $periodKey);
+                if ($period === 'daily') {
+                    try {
+                        $periodKey = Carbon::parse($periodKey)->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        // Keep original if parsing fails
+                    }
+                } elseif ($period === 'monthly') {
+                    if (preg_match('/^(\d{4})\s*-\s*(\d{2})$/', $periodKey, $matches)) {
+                        $periodKey = $matches[1] . '-' . str_pad($matches[2], 2, '0', STR_PAD_LEFT);
+                    } else {
+                        try {
+                            $parsed = Carbon::parse($periodKey);
+                            $periodKey = $parsed->format('Y-m');
+                        } catch (\Exception $e) {
+                            // Keep original if parsing fails
+                        }
+                    }
+                } elseif ($period === 'yearly') {
+                    if (preg_match('/(\d{4})/', $periodKey, $matches)) {
+                        $periodKey = (string) intval($matches[1]);
+                    } else {
+                        $periodKey = (string) intval($periodKey);
+                    }
+                }
+
+                if (!isset($groupedData[$periodKey])) {
+                    $groupedData[$periodKey] = [];
+                }
+                $groupedData[$periodKey][] = $row;
+            }
+
+            // Generate all periods in range
+            $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
+
+            // Format response based on period, ensuring all periods are included
+            $formattedData = [];
+            foreach ($allPeriods as $periodValue) {
+                $periodKeyStr = trim((string) $periodValue);
+                if (isset($groupedData[$periodKeyStr])) {
+                    $formattedData[] = [
+                        $dateLabel => $periodKeyStr,
+                        'data' => $groupedData[$periodKeyStr]
+                    ];
+                } else {
+                    // Add period with empty data array
+                    $formattedData[] = [
+                        $dateLabel => $periodKeyStr,
+                        'data' => []
+                    ];
                 }
             }
 
-            if (!isset($groupedData[$periodKey])) {
-                $groupedData[$periodKey] = [];
-            }
-            $groupedData[$periodKey][] = $row;
+            return response()->json([
+                'data' => $formattedData,
+                'date_range' => [
+                    'from' => $dateRange['date_from'],
+                    'to' => $dateRange['date_to']
+                ],
+                'period' => $period,
+                'grouping' => $dateLabel,
+                'calculation_method' => 'traditional'
+            ]);
         }
-
-        // Generate all periods in range
-        $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
-
-        // Format response based on period, ensuring all periods are included
-        $formattedData = [];
-        foreach ($allPeriods as $periodValue) {
-            $periodKeyStr = trim((string) $periodValue);
-            if (isset($groupedData[$periodKeyStr])) {
-                $formattedData[] = [
-                    $dateLabel => $periodKeyStr,
-                    'data' => $groupedData[$periodKeyStr]
-                ];
-            } else {
-                // Add period with empty data array
-                $formattedData[] = [
-                    $dateLabel => $periodKeyStr,
-                    'data' => []
-                ];
-            }
-        }
-
-        return response()->json([
-            'data' => $formattedData,
-            'date_range' => [
-                'from' => $dateRange['date_from'],
-                'to' => $dateRange['date_to']
-            ],
-            'period' => $period,
-            'grouping' => $dateLabel
-        ]);
     }
 
     /**
