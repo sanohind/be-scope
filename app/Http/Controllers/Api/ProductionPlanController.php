@@ -22,99 +22,138 @@ class ProductionPlanController extends ApiController
 
         try {
             $spreadsheet = IOFactory::load($file->getRealPath());
-            $rows = $spreadsheet->getActiveSheet()->toArray(null, true, true, true);
+            $sheet = $spreadsheet->getActiveSheet();
+            $rows = $sheet->toArray(null, true, true, true);
 
             if (empty($rows)) {
                 return $this->sendError('File kosong', [], 422);
             }
 
-            $headerRow = array_shift($rows);
-            $headers = [];
-            foreach ($headerRow as $column => $value) {
-                $normalized = strtolower(trim((string) $value));
-                if ($normalized) {
-                    $headers[$normalized] = $column;
-                }
-            }
-
-            foreach (['partno', 'divisi', 'qty_plan', 'plan_date'] as $required) {
-                if (!isset($headers[$required])) {
-                    return $this->sendError("Kolom {$required} tidak ditemukan pada header", [], 422);
-                }
-            }
+            // Skip header rows (row 1-3), data starts from row 4
+            // Remove rows 1, 2, 3
+            unset($rows[1], $rows[2], $rows[3]);
 
             $now = Carbon::now();
             $inserts = [];
             $updates = [];
             $inserted = 0;
             $updated = 0;
+            $skipped = 0;
+            $errors = [];
 
-            foreach ($rows as $row) {
-                $partno = $row[$headers['partno']] ?? null;
-                $divisi = $row[$headers['divisi']] ?? null;
-                $qtyPlan = $row[$headers['qty_plan']] ?? null;
-                $planDateRaw = $row[$headers['plan_date']] ?? null;
+            // Fixed column positions
+            $PARTNO_COL = 'B';
+            $DIVISI_COL = 'C';
+            $YEAR_COL = 'D';
+            $PERIOD_COL = 'E';
+            $FIRST_DAY_COL = 'F'; // Column F = day 1
 
-                if ($partno === null && $divisi === null && $qtyPlan === null && $planDateRaw === null) {
+            foreach ($rows as $rowIndex => $row) {
+                // Get partno, divisi, year, period from fixed columns
+                $partno = $row[$PARTNO_COL] ?? null;
+                $divisi = $row[$DIVISI_COL] ?? null;
+                $year = $row[$YEAR_COL] ?? null;
+                $period = $row[$PERIOD_COL] ?? null;
+
+                // Skip if all are empty
+                if (empty($partno) && empty($divisi) && empty($year) && empty($period)) {
                     continue;
                 }
 
-                $planDate = null;
-                if ($planDateRaw !== null && $planDateRaw !== '') {
-                    try {
-                        if (is_numeric($planDateRaw)) {
-                            // Format Excel numeric (contoh: 45300)
-                            $planDate = Carbon::instance(ExcelDate::excelToDateTimeObject($planDateRaw))->format('Y-m-d');
-                        } else {
-                            // Try parsing dengan berbagai format
-                            $dateString = trim((string) $planDateRaw);
-                            
-                            // Format: DD/MM/YYYY atau DD-MM-YYYY
-                            if (preg_match('/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/', $dateString)) {
-                                $planDate = Carbon::createFromFormat('d/m/Y', str_replace('-', '/', $dateString))->format('Y-m-d');
-                            } else {
-                                // Format lainnya: YYYY-MM-DD, MM/DD/YYYY, dll
-                                $planDate = Carbon::parse($dateString)->format('Y-m-d');
-                            }
-                        }
-                    } catch (\Throwable $e) {
-                        // Jika parsing gagal, set null
-                        $planDate = null;
-                    }
+                // Validate and parse partno
+                $partnoTrimmed = !empty($partno) ? trim((string) $partno) : null;
+                if (empty($partnoTrimmed)) {
+                    $errors[] = "Row {$rowIndex}: partno kosong";
+                    $skipped++;
+                    continue;
                 }
 
-                $partnoTrimmed = $partno !== '' ? trim((string) $partno) : null;
-                $divisiTrimmed = $divisi !== '' ? trim((string) $divisi) : null;
-                $qtyPlanParsed = $qtyPlan !== '' ? (int) $qtyPlan : null;
+                // Validate and parse divisi
+                $divisiTrimmed = !empty($divisi) ? trim((string) $divisi) : null;
+                if (empty($divisiTrimmed)) {
+                    $errors[] = "Row {$rowIndex}: divisi kosong";
+                    $skipped++;
+                    continue;
+                }
 
-                // Check if record with same partno, divisi and plan_date exists
-                $existingRecord = ProductionPlan::where('partno', $partnoTrimmed)
-                    ->where('divisi', $divisiTrimmed)
-                    ->where('plan_date', $planDate)
-                    ->first();
+                // Validate and parse year
+                $yearParsed = !empty($year) ? (int) $year : null;
+                if ($yearParsed === null || $yearParsed < 2000 || $yearParsed > 2100) {
+                    $errors[] = "Row {$rowIndex}: year tidak valid ({$year})";
+                    $skipped++;
+                    continue;
+                }
 
-                if ($existingRecord) {
-                    // Update existing record
-                    $updates[] = [
-                        'id' => $existingRecord->id,
-                        'qty_plan' => $qtyPlanParsed,
-                        'updated_at' => $now,
-                    ];
-                } else {
-                    // Insert new record
-                    $inserts[] = [
-                        'partno' => $partnoTrimmed,
-                        'divisi' => $divisiTrimmed,
-                        'qty_plan' => $qtyPlanParsed,
-                        'plan_date' => $planDate,
-                        'created_at' => $now,
-                        'updated_at' => $now,
-                    ];
+                // Validate and parse period (month)
+                $periodParsed = !empty($period) ? (int) $period : null;
+                if ($periodParsed === null || $periodParsed < 1 || $periodParsed > 12) {
+                    $errors[] = "Row {$rowIndex}: period tidak valid ({$period})";
+                    $skipped++;
+                    continue;
+                }
+
+                // Get number of days in this month
+                $daysInMonth = Carbon::create($yearParsed, $periodParsed, 1)->daysInMonth;
+
+                // Loop through each day (columns F, G, H, ... for day 1, 2, 3, ...)
+                for ($day = 1; $day <= $daysInMonth; $day++) {
+                    // Calculate column letter for this day
+                    // F = day 1, G = day 2, H = day 3, etc.
+                    // Column F is the 6th column (A=1, B=2, C=3, D=4, E=5, F=6)
+                    $columnIndex = 5 + $day; // F=6, G=7, H=8, etc.
+                    $columnLetter = $this->getColumnLetter($columnIndex);
+
+                    // Get qty_plan value from the cell
+                    $qtyPlan = $row[$columnLetter] ?? null;
+
+                    // Parse qty_plan as integer, default to 0 if empty
+                    if ($qtyPlan === null || $qtyPlan === '') {
+                        $qtyPlanParsed = 0;
+                    } else {
+                        $qtyPlanParsed = (int) $qtyPlan;
+                    }
+
+                    // Construct plan_date from year + period + day
+                    try {
+                        $planDate = Carbon::create($yearParsed, $periodParsed, $day)->format('Y-m-d');
+                    } catch (\Throwable $e) {
+                        $errors[] = "Row {$rowIndex}, Day {$day}: tanggal tidak valid ({$yearParsed}-{$periodParsed}-{$day})";
+                        continue;
+                    }
+
+                    // Check if record with same partno, divisi and plan_date exists
+                    $existingRecord = ProductionPlan::where('partno', $partnoTrimmed)
+                        ->where('divisi', $divisiTrimmed)
+                        ->where('plan_date', $planDate)
+                        ->first();
+
+                    if ($existingRecord) {
+                        // Update existing record
+                        $updates[] = [
+                            'id' => $existingRecord->id,
+                            'qty_plan' => $qtyPlanParsed,
+                            'updated_at' => $now,
+                        ];
+                    } else {
+                        // Insert new record
+                        $inserts[] = [
+                            'partno' => $partnoTrimmed,
+                            'divisi' => $divisiTrimmed,
+                            'qty_plan' => $qtyPlanParsed,
+                            'plan_date' => $planDate,
+                            'created_at' => $now,
+                            'updated_at' => $now,
+                        ];
+                    }
                 }
             }
 
             if (empty($inserts) && empty($updates)) {
-                return $this->sendError('Tidak ada baris data yang diproses', [], 422);
+                $errorMessage = 'Tidak ada data yang diproses';
+                if (!empty($errors)) {
+                    $errorMessage .= '. Errors: ' . implode('; ', array_slice($errors, 0, 5));
+                }
+                return $this->sendError($errorMessage, ['errors' => $errors], 422);
             }
 
             DB::transaction(function () use ($inserts, $updates, &$inserted, &$updated) {
@@ -131,13 +170,35 @@ class ProductionPlanController extends ApiController
                 }
             });
 
-            return $this->sendResponse([
+            $response = [
                 'inserted' => $inserted,
                 'updated' => $updated,
-            ], 'Import berhasil');
+                'skipped' => $skipped,
+            ];
+
+            if (!empty($errors)) {
+                $response['errors'] = array_slice($errors, 0, 10); // Limit to first 10 errors
+            }
+
+            return $this->sendResponse($response, 'Import berhasil');
         } catch (\Throwable $e) {
             return $this->sendError('Gagal memproses file: ' . $e->getMessage(), [], 500);
         }
+    }
+
+    /**
+     * Convert column index to Excel column letter
+     * Example: 1 => A, 2 => B, 27 => AA, etc.
+     */
+    private function getColumnLetter(int $columnIndex): string
+    {
+        $columnLetter = '';
+        while ($columnIndex > 0) {
+            $modulo = ($columnIndex - 1) % 26;
+            $columnLetter = chr(65 + $modulo) . $columnLetter;
+            $columnIndex = (int)(($columnIndex - $modulo) / 26);
+        }
+        return $columnLetter;
     }
 
     /**

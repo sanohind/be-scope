@@ -22,95 +22,126 @@ class DailyUseWhController extends ApiController
 
         try {
             $spreadsheet = IOFactory::load($file->getRealPath());
-            $rows = $spreadsheet->getActiveSheet()->toArray(null, true, true, true);
+            $sheet = $spreadsheet->getActiveSheet();
+            $rows = $sheet->toArray(null, true, true, true);
 
             if (empty($rows)) {
                 return $this->sendError('File kosong', [], 422);
             }
 
-            $headerRow = array_shift($rows);
-            $headers = [];
-            foreach ($headerRow as $column => $value) {
-                $normalized = strtolower(trim((string) $value));
-                if ($normalized) {
-                    $headers[$normalized] = $column;
-                }
-            }
-
-            foreach (['partno', 'daily_use', 'plan_date'] as $required) {
-                if (!isset($headers[$required])) {
-                    return $this->sendError("Kolom {$required} tidak ditemukan pada header", [], 422);
-                }
-            }
+            // Skip header rows (row 1-3), data starts from row 4
+            // Remove rows 1, 2, 3
+            unset($rows[1], $rows[2], $rows[3]);
 
             $now = Carbon::now();
             $inserts = [];
             $updates = [];
             $inserted = 0;
             $updated = 0;
+            $skipped = 0;
+            $errors = [];
 
-            foreach ($rows as $row) {
-                $partno = $row[$headers['partno']] ?? null;
-                $dailyUse = $row[$headers['daily_use']] ?? null;
-                $planDateRaw = $row[$headers['plan_date']] ?? null;
+            // Fixed column positions
+            $PARTNO_COL = 'B';
+            $YEAR_COL = 'C';
+            $PERIOD_COL = 'D';
+            $FIRST_DAY_COL = 'E'; // Column E = day 1
 
-                if ($partno === null && $dailyUse === null && $planDateRaw === null) {
+            foreach ($rows as $rowIndex => $row) {
+                // Get partno, year, period from fixed columns
+                $partno = $row[$PARTNO_COL] ?? null;
+                $year = $row[$YEAR_COL] ?? null;
+                $period = $row[$PERIOD_COL] ?? null;
+
+                // Skip if all three are empty
+                if (empty($partno) && empty($year) && empty($period)) {
                     continue;
                 }
 
-                $planDate = null;
-                if ($planDateRaw !== null && $planDateRaw !== '') {
-                    try {
-                        if (is_numeric($planDateRaw)) {
-                            // Format Excel numeric (contoh: 45300)
-                            $planDate = Carbon::instance(ExcelDate::excelToDateTimeObject($planDateRaw))->format('Y-m-d');
-                        } else {
-                            // Try parsing dengan berbagai format
-                            $dateString = trim((string) $planDateRaw);
-                            
-                            // Format: DD/MM/YYYY atau DD-MM-YYYY
-                            if (preg_match('/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/', $dateString)) {
-                                $planDate = Carbon::createFromFormat('d/m/Y', str_replace('-', '/', $dateString))->format('Y-m-d');
-                            } else {
-                                // Format lainnya: YYYY-MM-DD, MM/DD/YYYY, dll
-                                $planDate = Carbon::parse($dateString)->format('Y-m-d');
-                            }
-                        }
-                    } catch (\Throwable $e) {
-                        // Jika parsing gagal, set null
-                        $planDate = null;
-                    }
+                // Validate and parse partno
+                $partnoTrimmed = !empty($partno) ? trim((string) $partno) : null;
+                if (empty($partnoTrimmed)) {
+                    $errors[] = "Row {$rowIndex}: partno kosong";
+                    $skipped++;
+                    continue;
                 }
 
-                $partnoTrimmed = $partno !== '' ? trim((string) $partno) : null;
-                $dailyUseParsed = $dailyUse !== '' ? (int) $dailyUse : null;
+                // Validate and parse year
+                $yearParsed = !empty($year) ? (int) $year : null;
+                if ($yearParsed === null || $yearParsed < 2000 || $yearParsed > 2100) {
+                    $errors[] = "Row {$rowIndex}: year tidak valid ({$year})";
+                    $skipped++;
+                    continue;
+                }
 
-                // Check if record with same partno and plan_date exists
-                $existingRecord = DailyUseWh::where('partno', $partnoTrimmed)
-                    ->where('plan_date', $planDate)
-                    ->first();
+                // Validate and parse period (month)
+                $periodParsed = !empty($period) ? (int) $period : null;
+                if ($periodParsed === null || $periodParsed < 1 || $periodParsed > 12) {
+                    $errors[] = "Row {$rowIndex}: period tidak valid ({$period})";
+                    $skipped++;
+                    continue;
+                }
 
-                if ($existingRecord) {
-                    // Update existing record
-                    $updates[] = [
-                        'id' => $existingRecord->id,
-                        'daily_use' => $dailyUseParsed,
-                        'updated_at' => $now,
-                    ];
-                } else {
-                    // Insert new record
-                    $inserts[] = [
-                        'partno' => $partnoTrimmed,
-                        'daily_use' => $dailyUseParsed,
-                        'plan_date' => $planDate,
-                        'created_at' => $now,
-                        'updated_at' => $now,
-                    ];
+                // Get number of days in this month
+                $daysInMonth = Carbon::create($yearParsed, $periodParsed, 1)->daysInMonth;
+
+                // Loop through each day (columns E, F, G, ... for day 1, 2, 3, ...)
+                for ($day = 1; $day <= $daysInMonth; $day++) {
+                    // Calculate column letter for this day
+                    // E = day 1, F = day 2, G = day 3, etc.
+                    // Column E is the 5th column (A=1, B=2, C=3, D=4, E=5)
+                    $columnIndex = 4 + $day; // E=5, F=6, G=7, etc.
+                    $columnLetter = $this->getColumnLetter($columnIndex);
+
+                    // Get daily_use value from the cell
+                    $dailyUse = $row[$columnLetter] ?? null;
+
+                    // Parse daily_use as integer, default to 0 if empty
+                    if ($dailyUse === null || $dailyUse === '') {
+                        $dailyUseParsed = 0;
+                    } else {
+                        $dailyUseParsed = (int) $dailyUse;
+                    }
+
+                    // Construct plan_date from year + period + day
+                    try {
+                        $planDate = Carbon::create($yearParsed, $periodParsed, $day)->format('Y-m-d');
+                    } catch (\Throwable $e) {
+                        $errors[] = "Row {$rowIndex}, Day {$day}: tanggal tidak valid ({$yearParsed}-{$periodParsed}-{$day})";
+                        continue;
+                    }
+
+                    // Check if record with same partno and plan_date exists
+                    $existingRecord = DailyUseWh::where('partno', $partnoTrimmed)
+                        ->where('plan_date', $planDate)
+                        ->first();
+
+                    if ($existingRecord) {
+                        // Update existing record
+                        $updates[] = [
+                            'id' => $existingRecord->id,
+                            'daily_use' => $dailyUseParsed,
+                            'updated_at' => $now,
+                        ];
+                    } else {
+                        // Insert new record
+                        $inserts[] = [
+                            'partno' => $partnoTrimmed,
+                            'daily_use' => $dailyUseParsed,
+                            'plan_date' => $planDate,
+                            'created_at' => $now,
+                            'updated_at' => $now,
+                        ];
+                    }
                 }
             }
 
             if (empty($inserts) && empty($updates)) {
-                return $this->sendError('Tidak ada baris data yang diproses', [], 422);
+                $errorMessage = 'Tidak ada data yang diproses';
+                if (!empty($errors)) {
+                    $errorMessage .= '. Errors: ' . implode('; ', array_slice($errors, 0, 5));
+                }
+                return $this->sendError($errorMessage, ['errors' => $errors], 422);
             }
 
             DB::transaction(function () use ($inserts, $updates, &$inserted, &$updated) {
@@ -127,13 +158,35 @@ class DailyUseWhController extends ApiController
                 }
             });
 
-            return $this->sendResponse([
+            $response = [
                 'inserted' => $inserted,
                 'updated' => $updated,
-            ], 'Import berhasil');
+                'skipped' => $skipped,
+            ];
+
+            if (!empty($errors)) {
+                $response['errors'] = array_slice($errors, 0, 10); // Limit to first 10 errors
+            }
+
+            return $this->sendResponse($response, 'Import berhasil');
         } catch (\Throwable $e) {
             return $this->sendError('Gagal memproses file: ' . $e->getMessage(), [], 500);
         }
+    }
+
+    /**
+     * Convert column index to Excel column letter
+     * Example: 1 => A, 2 => B, 27 => AA, etc.
+     */
+    private function getColumnLetter(int $columnIndex): string
+    {
+        $columnLetter = '';
+        while ($columnIndex > 0) {
+            $modulo = ($columnIndex - 1) % 26;
+            $columnLetter = chr(65 + $modulo) . $columnLetter;
+            $columnIndex = (int)(($columnIndex - $modulo) / 26);
+        }
+        return $columnLetter;
     }
 
     /**
