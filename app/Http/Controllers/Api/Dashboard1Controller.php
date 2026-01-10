@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Models\StockByWh;
 use App\Models\StockByWhSnapshot;
 use App\Models\WarehouseStockSummary;
+use App\Models\DailyUseWh;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -185,6 +186,9 @@ class Dashboard1Controller extends ApiController
     /**
      * Chart 1.1: Stock Level Overview - KPI Cards
      * Uses snapshot data for historical view
+     * CRITICAL ITEMS:
+     * - For RM warehouses (WHRM01, WHRM02, WHMT01): Based on estimatedConsumption <= 0
+     * - For FG warehouses (WHFG01, WHFG02): Based on onhand < min_stock
      */
     public function stockLevelOverview(Request $request): JsonResponse
     {
@@ -213,11 +217,130 @@ class Dashboard1Controller extends ApiController
 
         $totalOnhand = (clone $baseQuery)->sum('onhand');
 
-        $itemsBelowSafetyStock = (clone $baseQuery)
-            ->whereNotNull('partno')
-            ->whereRaw('onhand < safety_stock')
-            ->distinct()
-            ->count('partno');
+        // Critical Items Calculation - different logic based on warehouse types
+        $criticalItems = 0;
+        
+        // Separate warehouses by type
+        $rmWarehouses = array_intersect($warehouses, ['WHRM01', 'WHRM02', 'WHMT01']);
+        $fgWarehouses = array_intersect($warehouses, ['WHFG01', 'WHFG02']);
+        
+        // Calculate critical items for FG warehouses (onhand < min_stock)
+        if (!empty($fgWarehouses)) {
+            $fgQuery = $snapshotDate
+                ? StockByWhSnapshot::where('snapshot_date', $snapshotDate)->whereIn('warehouse', $fgWarehouses)
+                : StockByWh::whereIn('warehouse', $fgWarehouses);
+            
+            if ($request->has('customer')) {
+                $fgQuery->where('customer', $request->customer);
+            }
+            if ($request->has('group_type_desc')) {
+                $fgQuery->where('group_type_desc', $request->group_type_desc);
+            }
+            
+            $criticalItems += $fgQuery
+                ->whereNotNull('partno')
+                ->whereRaw('onhand < min_stock')
+                ->distinct()
+                ->count('partno');
+        }
+        
+        // Calculate critical items for RM warehouses (estimatedConsumption <= 0)
+        if (!empty($rmWarehouses)) {
+            $planDate = $request->input('plan_date');
+            $planDateFrom = $request->input('date_from');
+            $planDateTo = $request->input('date_to');
+            
+            $useExactPlanDate = !empty($planDate);
+            $usePlanDateRange = !$useExactPlanDate && ($planDateFrom || $planDateTo);
+            
+            if ($useExactPlanDate || $usePlanDateRange) {
+                try {
+                    $planDateParsed = null;
+                    $planDateRange = null;
+
+                    if ($useExactPlanDate) {
+                        $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+                    } elseif ($usePlanDateRange) {
+                        $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
+                        $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                        if (!$from) {
+                            $from = Carbon::parse($dateRange['date_from'])->format('Y-m-d');
+                        }
+                        if (!$to) {
+                            $to = Carbon::parse($dateRange['date_to'])->format('Y-m-d');
+                        }
+                        $planDateRange = [$from, $to];
+                    }
+
+                    // Get DailyUseWh data
+                    $dailyUseQuery = DailyUseWh::whereNotNull('partno')
+                        ->whereIn('warehouse', $rmWarehouses);
+
+                    if ($useExactPlanDate) {
+                        $dailyUseQuery->where('plan_date', $planDateParsed);
+                    } elseif ($planDateRange) {
+                        $dailyUseQuery->whereBetween('plan_date', $planDateRange);
+                    }
+
+                    $dailyUseData = $dailyUseQuery->get();
+
+                    if ($dailyUseData->isNotEmpty()) {
+                        // Get stock items for RM warehouses
+                        $rmQuery = $snapshotDate
+                            ? StockByWhSnapshot::where('snapshot_date', $snapshotDate)->whereIn('warehouse', $rmWarehouses)
+                            : StockByWh::whereIn('warehouse', $rmWarehouses);
+                        
+                        if ($request->has('customer')) {
+                            $rmQuery->where('customer', $request->customer);
+                        }
+                        if ($request->has('group_type_desc')) {
+                            $rmQuery->where('group_type_desc', $request->group_type_desc);
+                        }
+                        
+                        $stockItems = $rmQuery->select('partno', 'onhand')->get();
+
+                        // Build mapping: partno -> onhand
+                        $partnoOnhandMap = [];
+                        foreach ($stockItems as $item) {
+                            $partno = trim((string) $item->partno);
+                            if ($partno !== '') {
+                                $partnoOnhandMap[$partno] = (float) ($item->onhand ?? 0);
+                            }
+                        }
+
+                        // Calculate critical items based on estimatedConsumption
+                        $partnoProcessed = [];
+                        foreach ($dailyUseData as $dailyUseItem) {
+                            $partno = trim((string) ($dailyUseItem->partno ?? ''));
+                            $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
+
+                            if ($partno === '' || isset($partnoProcessed[$partno])) {
+                                continue;
+                            }
+
+                            $partnoProcessed[$partno] = true;
+
+                            // Get onhand for this partno
+                            $onhand = $partnoOnhandMap[$partno] ?? 0;
+
+                            // Calculate estimatedConsumption
+                            if ($dailyUse > 0) {
+                                $estimatedConsumption = $onhand / $dailyUse;
+                            } else {
+                                $estimatedConsumption = 0;
+                            }
+
+                            // Count as critical if estimatedConsumption <= 0
+                            if ($estimatedConsumption <= 0) {
+                                $criticalItems++;
+                            }
+                        }
+                    }
+                } catch (\Exception $e) {
+                    // If plan_date parsing fails, critical items for RM remains 0
+                }
+            }
+        }
 
         $itemsAboveMaxStock = (clone $baseQuery)
             ->whereNotNull('partno')
@@ -229,7 +352,7 @@ class Dashboard1Controller extends ApiController
 
         return response()->json([
             'total_onhand' => round($totalOnhand, 2),
-            'items_below_safety_stock' => $itemsBelowSafetyStock,
+            'critical_items' => $criticalItems,
             'items_above_max_stock' => $itemsAboveMaxStock,
             'total_items' => $totalItems,
             'average_stock_level' => round($avgStockLevel, 2),

@@ -41,20 +41,22 @@ class DailyUseWhController extends ApiController
             $skipped = 0;
             $errors = [];
 
-            // Fixed column positions
+            // Fixed column positions (updated format)
             $PARTNO_COL = 'B';
-            $YEAR_COL = 'C';
-            $PERIOD_COL = 'D';
-            $FIRST_DAY_COL = 'E'; // Column E = day 1
+            $WAREHOUSE_COL = 'C';  // New column for warehouse
+            $YEAR_COL = 'D';       // Moved from C to D
+            $PERIOD_COL = 'E';     // Moved from D to E
+            $FIRST_DAY_COL = 'F';  // Column F = day 1 (moved from E to F)
 
             foreach ($rows as $rowIndex => $row) {
-                // Get partno, year, period from fixed columns
+                // Get partno, warehouse, year, period from fixed columns
                 $partno = $row[$PARTNO_COL] ?? null;
+                $warehouse = $row[$WAREHOUSE_COL] ?? null;
                 $year = $row[$YEAR_COL] ?? null;
                 $period = $row[$PERIOD_COL] ?? null;
 
-                // Skip if all three are empty
-                if (empty($partno) && empty($year) && empty($period)) {
+                // Skip if all required fields are empty
+                if (empty($partno) && empty($warehouse) && empty($year) && empty($period)) {
                     continue;
                 }
 
@@ -62,6 +64,14 @@ class DailyUseWhController extends ApiController
                 $partnoTrimmed = !empty($partno) ? trim((string) $partno) : null;
                 if (empty($partnoTrimmed)) {
                     $errors[] = "Row {$rowIndex}: partno kosong";
+                    $skipped++;
+                    continue;
+                }
+
+                // Validate and parse warehouse
+                $warehouseTrimmed = !empty($warehouse) ? trim((string) $warehouse) : null;
+                if (empty($warehouseTrimmed)) {
+                    $errors[] = "Row {$rowIndex}: warehouse kosong";
                     $skipped++;
                     continue;
                 }
@@ -85,12 +95,12 @@ class DailyUseWhController extends ApiController
                 // Get number of days in this month
                 $daysInMonth = Carbon::create($yearParsed, $periodParsed, 1)->daysInMonth;
 
-                // Loop through each day (columns E, F, G, ... for day 1, 2, 3, ...)
+                // Loop through each day (columns F, G, H, ... for day 1, 2, 3, ...)
                 for ($day = 1; $day <= $daysInMonth; $day++) {
                     // Calculate column letter for this day
-                    // E = day 1, F = day 2, G = day 3, etc.
-                    // Column E is the 5th column (A=1, B=2, C=3, D=4, E=5)
-                    $columnIndex = 4 + $day; // E=5, F=6, G=7, etc.
+                    // F = day 1, G = day 2, H = day 3, etc.
+                    // Column F is the 6th column (A=1, B=2, C=3, D=4, E=5, F=6)
+                    $columnIndex = 5 + $day; // F=6, G=7, H=8, etc.
                     $columnLetter = $this->getColumnLetter($columnIndex);
 
                     // Get daily_use value from the cell
@@ -111,8 +121,9 @@ class DailyUseWhController extends ApiController
                         continue;
                     }
 
-                    // Check if record with same partno and plan_date exists
+                    // Check if record with same partno, warehouse, and plan_date exists
                     $existingRecord = DailyUseWh::where('partno', $partnoTrimmed)
+                        ->where('warehouse', $warehouseTrimmed)
                         ->where('plan_date', $planDate)
                         ->first();
 
@@ -127,6 +138,7 @@ class DailyUseWhController extends ApiController
                         // Insert new record
                         $inserts[] = [
                             'partno' => $partnoTrimmed,
+                            'warehouse' => $warehouseTrimmed,
                             'daily_use' => $dailyUseParsed,
                             'plan_date' => $planDate,
                             'created_at' => $now,

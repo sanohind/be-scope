@@ -13,6 +13,7 @@ class DailyUseWh extends Model
 
     protected $fillable = [
         'partno',
+        'warehouse',
         'daily_use',
         'plan_date',
     ];

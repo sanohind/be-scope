@@ -271,6 +271,7 @@ Route::prefix('dashboard')->group(function () {
     // Sales Analytics: Bar Chart Data
     Route::prefix('sales-analytics')->group(function () {
         Route::get('/bar-chart', [SalesAnalyticsController::class, 'getBarChartData']);
+        Route::get('/daily-bar-chart', [SalesAnalyticsController::class, 'getDailyBarChartData']);
         Route::get('/sales-shipment', [SalesAnalyticsController::class, 'getSalesShipmentByPeriod']);
         Route::get('/so-monitor', [SalesAnalyticsController::class, 'getSoMonitorByPeriod']);
         Route::get('/combined-details', [SalesAnalyticsController::class, 'getCombinedDataWithDetails']);

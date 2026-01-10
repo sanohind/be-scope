@@ -283,7 +283,9 @@ class Dashboard1RevisionController extends ApiController
      * 6 metrics combining stock + transaction data
      * DATE FILTER: Applied to transaction metrics only
      * Uses snapshot data for historical stock view
-     * CRITICAL ITEMS: Based on estimatedConsumption (onhand / daily_use) <= 0
+     * CRITICAL ITEMS: 
+     * - For FG warehouses (WHFG01, WHFG02): Based on onhand < min_stock
+     * - For RM warehouses (WHRM01, WHRM02, WHMT01): Based on estimatedConsumption <= 0
      */
     public function comprehensiveKpi(Request $request): JsonResponse
     {
@@ -308,97 +310,113 @@ class Dashboard1RevisionController extends ApiController
         $totalSku = (clone $stockQuery)->distinct()->count('partno');
         $totalOnhand = (clone $stockQuery)->sum('onhand');
 
-        // Critical Items Calculation based on estimatedConsumption
-        // Get plan_date parameters
-        $planDate = $request->input('plan_date');
-        $planDateFrom = $request->input('date_from');
-        $planDateTo = $request->input('date_to');
-        
+        // Critical Items Calculation - different logic based on warehouse type
         $criticalItems = 0;
         
-        // Determine plan_date filtering (exact or range)
-        $useExactPlanDate = !empty($planDate);
-        $usePlanDateRange = !$useExactPlanDate && ($planDateFrom || $planDateTo);
+        // Check warehouse type
+        $fgWarehouses = ['WHFG01', 'WHFG02'];
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
         
-        if ($useExactPlanDate || $usePlanDateRange) {
-            try {
-                $planDateParsed = null;
-                $planDateRange = null;
+        if (in_array($warehouse, $fgWarehouses)) {
+            // For FG warehouses: Use onhand < min_stock logic
+            $criticalItems = (clone $stockQuery)
+                ->whereNotNull('partno')
+                ->whereRaw('onhand < min_stock')
+                ->distinct()
+                ->count('partno');
+                
+        } elseif (in_array($warehouse, $rmWarehouses)) {
+            // For RM warehouses: Use estimatedConsumption logic
+            // Get plan_date parameters
+            $planDate = $request->input('plan_date');
+            $planDateFrom = $request->input('date_from');
+            $planDateTo = $request->input('date_to');
+            
+            // Determine plan_date filtering (exact or range)
+            $useExactPlanDate = !empty($planDate);
+            $usePlanDateRange = !$useExactPlanDate && ($planDateFrom || $planDateTo);
+            
+            if ($useExactPlanDate || $usePlanDateRange) {
+                try {
+                    $planDateParsed = null;
+                    $planDateRange = null;
 
-                if ($useExactPlanDate) {
-                    $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
-                } elseif ($usePlanDateRange) {
-                    // Use date range when plan_date not provided
-                    $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
-                    $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
-                    // Fall back to dateRange if not provided
-                    if (!$from) {
-                        $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                    if ($useExactPlanDate) {
+                        $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+                    } elseif ($usePlanDateRange) {
+                        // Use date range when plan_date not provided
+                        $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
+                        $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                        // Fall back to dateRange if not provided
+                        if (!$from) {
+                            $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                        }
+                        if (!$to) {
+                            $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                        }
+                        $planDateRange = [$from, $to];
                     }
-                    if (!$to) {
-                        $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+
+                    // Get DailyUseWh data for the plan_date
+                    $dailyUseQuery = DailyUseWh::whereNotNull('partno')
+                        ->where('warehouse', $warehouse);
+
+                    if ($useExactPlanDate) {
+                        $dailyUseQuery->where('plan_date', $planDateParsed);
+                    } elseif ($planDateRange) {
+                        $dailyUseQuery->whereBetween('plan_date', $planDateRange);
                     }
-                    $planDateRange = [$from, $to];
+
+                    $dailyUseData = $dailyUseQuery->get();
+
+                    if ($dailyUseData->isNotEmpty()) {
+                        // Get stock items with their partno and onhand
+                        $stockItems = (clone $stockQuery)
+                            ->select('partno', 'onhand')
+                            ->get();
+
+                        // Build mapping: partno -> onhand
+                        $partnoOnhandMap = [];
+                        foreach ($stockItems as $item) {
+                            $partno = trim((string) $item->partno);
+                            if ($partno !== '') {
+                                $partnoOnhandMap[$partno] = (float) ($item->onhand ?? 0);
+                            }
+                        }
+
+                        // Calculate critical items based on estimatedConsumption
+                        $partnoProcessed = [];
+                        foreach ($dailyUseData as $dailyUseItem) {
+                            $partno = trim((string) ($dailyUseItem->partno ?? ''));
+                            $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
+
+                            // Skip if already processed or invalid
+                            if ($partno === '' || isset($partnoProcessed[$partno])) {
+                                continue;
+                            }
+
+                            $partnoProcessed[$partno] = true;
+
+                            // Get onhand for this partno
+                            $onhand = $partnoOnhandMap[$partno] ?? 0;
+
+                            // Calculate estimatedConsumption
+                            if ($dailyUse > 0) {
+                                $estimatedConsumption = $onhand / $dailyUse;
+                            } else {
+                                $estimatedConsumption = 0;
+                            }
+
+                            // Count as critical if estimatedConsumption <= 0
+                            if ($estimatedConsumption <= 0) {
+                                $criticalItems++;
+                            }
+                        }
+                    }
+                } catch (\Exception $e) {
+                    // If plan_date parsing fails, critical items remains 0
+                    // Log error if needed: \Log::error('Critical items calculation error: ' . $e->getMessage());
                 }
-
-                // Get DailyUseWh data for the plan_date
-                $dailyUseQuery = DailyUseWh::whereNotNull('partno');
-
-                if ($useExactPlanDate) {
-                    $dailyUseQuery->where('plan_date', $planDateParsed);
-                } elseif ($planDateRange) {
-                    $dailyUseQuery->whereBetween('plan_date', $planDateRange);
-                }
-
-                $dailyUseData = $dailyUseQuery->get();
-
-                if ($dailyUseData->isNotEmpty()) {
-                    // Get stock items with their partno and onhand
-                    $stockItems = (clone $stockQuery)
-                        ->select('partno', 'onhand')
-                        ->get();
-
-                    // Build mapping: partno -> onhand
-                    $partnoOnhandMap = [];
-                    foreach ($stockItems as $item) {
-                        $partno = trim((string) $item->partno);
-                        if ($partno !== '') {
-                            $partnoOnhandMap[$partno] = (float) ($item->onhand ?? 0);
-                        }
-                    }
-
-                    // Calculate critical items based on estimatedConsumption
-                    $partnoProcessed = [];
-                    foreach ($dailyUseData as $dailyUseItem) {
-                        $partno = trim((string) ($dailyUseItem->partno ?? ''));
-                        $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
-
-                        // Skip if already processed or invalid
-                        if ($partno === '' || isset($partnoProcessed[$partno])) {
-                            continue;
-                        }
-
-                        $partnoProcessed[$partno] = true;
-
-                        // Get onhand for this partno
-                        $onhand = $partnoOnhandMap[$partno] ?? 0;
-
-                        // Calculate estimatedConsumption
-                        if ($dailyUse > 0) {
-                            $estimatedConsumption = $onhand / $dailyUse;
-                        } else {
-                            $estimatedConsumption = 0;
-                        }
-
-                        // Count as critical if estimatedConsumption <= 0
-                        if ($estimatedConsumption <= 0) {
-                            $criticalItems++;
-                        }
-                    }
-                }
-            } catch (\Exception $e) {
-                // If plan_date parsing fails, critical items remains 0
-                // Log error if needed: \Log::error('Critical items calculation error: ' . $e->getMessage());
             }
         }
 
@@ -543,7 +561,8 @@ class Dashboard1RevisionController extends ApiController
             }
 
             // Get DailyUseWh data
-            $dailyUseQuery = DailyUseWh::whereNotNull('partno');
+            $dailyUseQuery = DailyUseWh::whereNotNull('partno')
+                ->where('warehouse', $warehouse);
 
             if ($useExactPlanDate) {
                 $dailyUseQuery->where('plan_date', $planDateParsed);
@@ -1849,7 +1868,8 @@ class Dashboard1RevisionController extends ApiController
                 }
 
                 // Get all DailyUseWh data for the plan_date
-                $dailyUseQuery = DailyUseWh::whereNotNull('partno');
+                $dailyUseQuery = DailyUseWh::whereNotNull('partno')
+                    ->where('warehouse', $warehouse);
 
                 if ($useExactPlanDate) {
                     $dailyUseQuery->where('plan_date', $planDateParsed);

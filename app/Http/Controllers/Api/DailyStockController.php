@@ -328,14 +328,34 @@ class DailyStockController extends Controller
                 return $item->warehouse . '|' . trim($item->period_key);
             });
 
+        // Query 4: Get inventory adjustment from InventoryTransaction (trans_type = 'Inventory Adjustment')
+        $adjustmentRecords = InventoryTransaction::query()
+            ->whereIn('warehouse', $warehousesToQuery)
+            ->where('trans_type', 'Inventory Adjustment')
+            ->whereBetween('trans_date2', [
+                $dateRange['date_from_carbon']->startOfDay(),
+                $dateRange['date_to_carbon']->endOfDay()
+            ])
+            ->selectRaw("
+                {$transDateFormat} as period_key,
+                warehouse,
+                SUM(qty) as adjustment_total
+            ")
+            ->groupByRaw("{$transDateFormat}, warehouse")
+            ->get()
+            ->keyBy(function($item) {
+                return $item->warehouse . '|' . trim($item->period_key);
+            });
+
         // Combine all data by creating a unified collection
         // Get all unique period_key + warehouse combinations
         $allKeys = collect($onhandRecords->keys())
             ->merge($receiptRecords->keys())
             ->merge($issueRecords->keys())
+            ->merge($adjustmentRecords->keys())
             ->unique();
 
-        $records = $allKeys->map(function($key) use ($onhandRecords, $receiptRecords, $issueRecords, $period, $dateRange) {
+        $records = $allKeys->map(function($key) use ($onhandRecords, $receiptRecords, $issueRecords, $adjustmentRecords, $period, $dateRange) {
             [$warehouse, $periodKey] = explode('|', $key);
             
             // Clean up period_key - trim whitespace
@@ -348,6 +368,7 @@ class DailyStockController extends Controller
             $onhandData = $onhandRecords->get($cleanKey);
             $receiptData = $receiptRecords->get($cleanKey);
             $issueData = $issueRecords->get($cleanKey);
+            $adjustmentData = $adjustmentRecords->get($cleanKey);
 
             // Determine period_start and period_end based on period_key
             try {
@@ -376,6 +397,7 @@ class DailyStockController extends Controller
                 'onhand_total' => $onhandData ? (int)$onhandData->onhand_total : 0,
                 'receipt_total' => $receiptData ? (int)$receiptData->receipt_total : 0,
                 'issue_total' => $issueData ? (int)$issueData->issue_total : 0,
+                'adjustment_total' => $adjustmentData ? (int)$adjustmentData->adjustment_total : 0,
             ];
         })
             ->sortBy('warehouse')
@@ -467,6 +489,7 @@ class DailyStockController extends Controller
                     $onhand = $existing->onhand_total ?? $existing->getAttribute('onhand_total') ?? 0;
                     $receipt = $existing->receipt_total ?? $existing->getAttribute('receipt_total') ?? 0;
                     $issue = $existing->issue_total ?? $existing->getAttribute('issue_total') ?? 0;
+                    $adjustment = $existing->adjustment_total ?? $existing->getAttribute('adjustment_total') ?? 0;
 
                     return [
                         'period' => $periodValue,
@@ -477,6 +500,7 @@ class DailyStockController extends Controller
                         'onhand' => (int) $onhand,
                         'receipt' => (int) $receipt,
                         'issue' => (int) $issue,
+                        'adjustment' => (int) $adjustment,
                     ];
                 } else {
                     // Fill with zero values for missing periods
@@ -501,6 +525,7 @@ class DailyStockController extends Controller
                         'onhand' => 0,
                         'receipt' => 0,
                         'issue' => 0,
+                        'adjustment' => 0,
                     ];
                 }
             })->values();

@@ -97,6 +97,80 @@ class SalesAnalyticsController extends ApiController
         return $filledData;
     }
     /**
+     * Generate all dates between date_from and date_to
+     *
+     * @param string|null $dateFrom
+     * @param string|null $dateTo
+     * @return array Array of dates in Y-m-d format
+     */
+    private function generateAllDates(?string $dateFrom, ?string $dateTo): array
+    {
+        $dates = [];
+        
+        // If no dates provided, use current month
+        if (!$dateFrom && !$dateTo) {
+            $dateFrom = Carbon::now()->startOfMonth()->format('Y-m-d');
+            $dateTo = Carbon::now()->endOfMonth()->format('Y-m-d');
+        }
+        
+        // If only one date provided, use it for both
+        if ($dateFrom && !$dateTo) {
+            $dateTo = $dateFrom;
+        }
+        if (!$dateFrom && $dateTo) {
+            $dateFrom = $dateTo;
+        }
+        
+        $start = Carbon::parse($dateFrom);
+        $end = Carbon::parse($dateTo);
+        
+        // Generate all dates in range (inclusive of end date)
+        while ($start->lte($end)) {
+            $dates[] = $start->format('Y-m-d');
+            $start->addDay();
+        }
+        
+        return $dates;
+    }
+
+    /**
+     * Fill missing dates with zero values
+     *
+     * @param array $data Existing data
+     * @param array $allDates All dates that should exist
+     * @param array $zeroFields Fields to set to 0 for missing dates
+     * @return array Filled data array
+     */
+    private function fillMissingDates(array $data, array $allDates, array $zeroFields = ['total_delivery' => 0, 'total_po' => 0]): array
+    {
+        if (empty($allDates)) {
+            return $data;
+        }
+
+        // Create keyed array from existing data
+        $dataByDate = [];
+        foreach ($data as $item) {
+            $dataByDate[$item['date']] = $item;
+        }
+
+        // Fill missing dates
+        $filledData = [];
+        foreach ($allDates as $date) {
+            if (isset($dataByDate[$date])) {
+                $filledData[] = $dataByDate[$date];
+            } else {
+                $zeroEntry = ['date' => $date];
+                foreach ($zeroFields as $field => $value) {
+                    $zeroEntry[$field] = $value;
+                }
+                $filledData[] = $zeroEntry;
+            }
+        }
+
+        return $filledData;
+    }
+
+    /**
      * Get bar chart data combining SalesShipment and SoMonitor
      *
      * @param Request $request
@@ -220,6 +294,124 @@ class SalesAnalyticsController extends ApiController
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to fetch bar chart data',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get daily bar chart data combining SalesShipment and SoMonitor
+     * Accepts date_from and date_to parameters (optional, defaults to current month)
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function getDailyBarChartData(Request $request): JsonResponse
+    {
+        try {
+            // Get date parameters
+            $dateFrom = $request->input('date_from');
+            $dateTo = $request->input('date_to');
+
+            // If no dates provided, use current month
+            if (!$dateFrom && !$dateTo) {
+                $dateFrom = Carbon::now()->startOfMonth()->format('Y-m-d');
+                $dateTo = Carbon::now()->endOfMonth()->format('Y-m-d');
+            }
+
+            // If only one date provided, use it for both
+            if ($dateFrom && !$dateTo) {
+                $dateTo = $dateFrom;
+            }
+            if (!$dateFrom && $dateTo) {
+                $dateFrom = $dateTo;
+            }
+
+            // Build query for SalesShipment (from so_invoice_line)
+            // Using CAST for SQL Server compatibility
+            $salesShipmentQuery = DB::connection('erp')->table('so_invoice_line')
+                ->select(
+                    DB::raw('CAST(delivery_date AS DATE) as date'),
+                    DB::raw('SUM(delivered_qty) as total_delivery'),
+                    DB::raw('0 as total_po')
+                )
+                ->whereRaw('CAST(delivery_date AS DATE) >= ?', [$dateFrom])
+                ->whereRaw('CAST(delivery_date AS DATE) <= ?', [$dateTo])
+                ->groupBy(DB::raw('CAST(delivery_date AS DATE)'));
+
+            // Build query for SoMonitor
+            // Using CAST for SQL Server compatibility
+            $soMonitorQuery = DB::connection('erp')->table('so_monitor')
+                ->select(
+                    DB::raw('CAST(planned_delivery_date AS DATE) as date'),
+                    DB::raw('0 as total_delivery'),
+                    DB::raw('SUM(order_qty) as total_po')
+                )
+                ->where('sequence', 0)
+                ->whereRaw('CAST(planned_delivery_date AS DATE) >= ?', [$dateFrom])
+                ->whereRaw('CAST(planned_delivery_date AS DATE) <= ?', [$dateTo])
+                ->groupBy(DB::raw('CAST(planned_delivery_date AS DATE)'));
+
+            // Get data from both queries separately and merge in PHP
+            $salesShipmentData = $salesShipmentQuery->get();
+            $soMonitorData = $soMonitorQuery->get();
+
+            // Merge data by date
+            $mergedData = [];
+
+            foreach ($salesShipmentData as $row) {
+                $date = $row->date;
+
+                if (!isset($mergedData[$date])) {
+                    $mergedData[$date] = [
+                        'date' => $date,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                    ];
+                }
+
+                $mergedData[$date]['total_delivery'] += (float)$row->total_delivery;
+            }
+
+            foreach ($soMonitorData as $row) {
+                $date = $row->date;
+
+                if (!isset($mergedData[$date])) {
+                    $mergedData[$date] = [
+                        'date' => $date,
+                        'total_delivery' => 0,
+                        'total_po' => 0,
+                    ];
+                }
+
+                $mergedData[$date]['total_po'] += (float)$row->total_po;
+            }
+
+            // Reset array keys and sort by date
+            $result = array_values($mergedData);
+            usort($result, function ($a, $b) {
+                return strcmp($a['date'], $b['date']);
+            });
+
+            // Generate all dates and fill missing ones with zeros
+            $allDates = $this->generateAllDates($dateFrom, $dateTo);
+            
+            if (!empty($allDates)) {
+                $result = $this->fillMissingDates($result, $allDates, ['total_delivery' => 0, 'total_po' => 0]);
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $result,
+                'count' => count($result),
+                'date_from' => $dateFrom,
+                'date_to' => $dateTo,
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch daily bar chart data',
                 'error' => $e->getMessage(),
             ], 500);
         }
