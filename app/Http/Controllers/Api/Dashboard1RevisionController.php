@@ -641,7 +641,8 @@ class Dashboard1RevisionController extends ApiController
                 }
 
                 // Determine stock status based on estimatedConsumption
-                if ($dailyUse === 0.0 && $estimatedConsumption === 0.0) {
+                // Check dailyUse = 0 first (no data uploaded yet)
+                if ($dailyUse === 0.0) {
                     $stockStatus = 'Undefined';
                 } elseif ($estimatedConsumption <= 0) {
                     $stockStatus = 'Critical';
