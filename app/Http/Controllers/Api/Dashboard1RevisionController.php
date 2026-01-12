@@ -2113,4 +2113,213 @@ class Dashboard1RevisionController extends ApiController
             ]
         ]);
     }
+
+    /**
+     * TABLE: Raw Material Stock Level Detail
+     * Provides paginated table with detail per partno for RM warehouses
+     * Includes daily_use and estimatedConsumption matched by partno
+     * Uses stockbywh for basic info and stock_by_wh_snapshots for onhand
+     */
+    public function rawMaterialStockLevelDetail(Request $request): JsonResponse
+    {
+        // Get warehouse parameter - validate it's an RM warehouse
+        $warehouse = $this->getWarehouse($request);
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
+        
+        if (!in_array($warehouse, $rmWarehouses)) {
+            return response()->json([
+                'error' => 'This endpoint is only available for RM warehouses (WHRM01, WHRM02, WHMT01)'
+            ], 400);
+        }
+
+        // Get pagination parameters
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = min(200, max(10, (int) $request->input('per_page', 50)));
+        $offset = ($page - 1) * $perPage;
+
+        // Get date range for daily use filtering
+        $dateFrom = $request->input('date_from');
+        $dateTo = $request->input('date_to');
+        
+        // Default to current date if not provided
+        if (!$dateFrom && !$dateTo) {
+            $dateFrom = Carbon::now()->format('Y-m-d');
+            $dateTo = Carbon::now()->format('Y-m-d');
+        } elseif (!$dateFrom) {
+            $dateFrom = $dateTo;
+        } elseif (!$dateTo) {
+            $dateTo = $dateFrom;
+        }
+
+        // Parse dates
+        try {
+            $dateFromParsed = Carbon::parse($dateFrom)->format('Y-m-d');
+            $dateToParsed = Carbon::parse($dateTo)->format('Y-m-d');
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => 'Invalid date format. Please use Y-m-d format.'
+            ], 400);
+        }
+
+
+        // Get group_type filter parameter
+        $groupType = $request->input('group_type');
+        
+        // Get search parameter for partno
+        $search = $request->input('search');
+
+        // Get stock data from stockbywh for basic information
+        $stockQuery = DB::connection('erp')
+            ->table('stockbywh as s')
+            ->where('s.warehouse', $warehouse)
+            ->whereNotNull('s.partno');
+
+        // Apply group_type filter if provided
+        if ($groupType) {
+            $stockQuery->where('s.group_type_desc', $groupType);
+        }
+        
+        // Apply search filter if provided
+        if ($search) {
+            $stockQuery->where('s.partno', 'LIKE', "%{$search}%");
+        }
+
+        // Get total count for pagination
+        $total = (clone $stockQuery)->count();
+
+        // Get paginated stock data with sorting by partno
+        $stockData = (clone $stockQuery)
+            ->select(
+                's.partno',
+                's.desc',
+                's.location',
+                's.group_type_desc',
+                's.warehouse',
+                DB::raw('CAST(s.min_stock AS DECIMAL(18,2)) as min_stock'),
+                DB::raw('CAST(s.max_stock AS DECIMAL(18,2)) as max_stock')
+            )
+            ->orderBy('s.partno')
+            ->offset($offset)
+            ->limit($perPage)
+            ->get();
+
+        // Get latest snapshot date for this warehouse within the date range
+        $latestSnapshotDate = StockByWhSnapshot::where('warehouse', $warehouse)
+            ->whereBetween('snapshot_date', [$dateFromParsed, $dateToParsed])
+            ->max('snapshot_date');
+
+        // Get onhand data from stock_by_wh_snapshots (latest snapshot in date range)
+        // If no snapshot exists, onhand will default to 0
+        $snapshotOnhandMap = [];
+        
+        if ($latestSnapshotDate) {
+            $snapshotQuery = StockByWhSnapshot::where('warehouse', $warehouse)
+                ->where('snapshot_date', $latestSnapshotDate)
+                ->whereNotNull('partno');
+            
+            // Apply group_type filter if provided
+            if ($groupType) {
+                $snapshotQuery->where('group_type_desc', $groupType);
+            }
+            
+            // Apply search filter if provided
+            if ($search) {
+                $snapshotQuery->where('partno', 'LIKE', "%{$search}%");
+            }
+            
+            $snapshotData = $snapshotQuery->select('partno', 'onhand')->get();
+
+            foreach ($snapshotData as $snapshot) {
+                $partno = trim((string) $snapshot->partno);
+                if ($partno !== '') {
+                    $snapshotOnhandMap[$partno] = (float) ($snapshot->onhand ?? 0);
+                }
+            }
+        }
+
+        // Get DailyUseWh data for the date range
+        $dailyUseQuery = DailyUseWh::whereNotNull('partno')
+            ->where('warehouse', $warehouse)
+            ->whereBetween('plan_date', [$dateFromParsed, $dateToParsed]);
+
+        $dailyUseData = $dailyUseQuery->get();
+
+        // Build partno -> daily_use mapping (sum if multiple dates)
+        $partnoDailyUseMap = [];
+        foreach ($dailyUseData as $dailyUseItem) {
+            $partno = trim((string) ($dailyUseItem->partno ?? ''));
+            $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
+            if ($partno !== '') {
+                if (!isset($partnoDailyUseMap[$partno])) {
+                    $partnoDailyUseMap[$partno] = 0;
+                }
+                $partnoDailyUseMap[$partno] += $dailyUse;
+            }
+        }
+
+        // Process stock data and add daily_use and estimatedConsumption
+        $processedData = [];
+        foreach ($stockData as $item) {
+            $partno = trim((string) $item->partno);
+            
+            // Get onhand from snapshot (default to 0 if not found)
+            $onhand = $snapshotOnhandMap[$partno] ?? 0;
+            $dailyUse = (float) ($partnoDailyUseMap[$partno] ?? 0);
+
+            // Calculate estimatedConsumption
+            if ($dailyUse > 0) {
+                $estimatedConsumption = $onhand / $dailyUse;
+            } else {
+                $estimatedConsumption = 0;
+            }
+
+            // Determine stock status based on estimatedConsumption
+            // Check dailyUse = 0 first (no data uploaded yet)
+            if ($dailyUse === 0.0) {
+                $stockStatus = 'Undefined';
+            } elseif ($estimatedConsumption <= 0) {
+                $stockStatus = 'Critical';
+            } elseif ($estimatedConsumption <= 3) {
+                $stockStatus = 'Low Stock';
+            } elseif ($estimatedConsumption <= 9) {
+                $stockStatus = 'Normal';
+            } else {
+                $stockStatus = 'Overstock';
+            }
+
+            $processedData[] = [
+                'partno' => $partno,
+                'desc' => $item->desc ?? '',
+                'location' => $item->location ?? '',
+                'group_type_desc' => $item->group_type_desc ?? '',
+                'warehouse' => $item->warehouse ?? '',
+                'onhand' => round($onhand, 2),
+                'min_stock' => round((float) ($item->min_stock ?? 0), 2),
+                'max_stock' => round((float) ($item->max_stock ?? 0), 2),
+                'daily_use' => round($dailyUse, 2),
+                'estimated_consumption' => round($estimatedConsumption, 2),
+                'stock_status' => $stockStatus
+            ];
+        }
+
+        return response()->json([
+            'data' => $processedData,
+            'filters' => [
+                'warehouse' => $warehouse,
+                'date_from' => $dateFromParsed,
+                'date_to' => $dateToParsed,
+                'group_type' => $groupType,
+                'search' => $search
+            ],
+            'snapshot_date' => $latestSnapshotDate,
+            'pagination' => [
+                'total' => $total,
+                'per_page' => $perPage,
+                'current_page' => $page,
+                'last_page' => $perPage > 0 ? (int) ceil($total / $perPage) : 1,
+                'from' => $total > 0 ? $offset + 1 : 0,
+                'to' => min($offset + $perPage, $total)
+            ]
+        ]);
+    }
 }

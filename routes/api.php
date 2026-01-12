@@ -129,6 +129,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/recent-transaction-history', [Dashboard1RevisionController::class, 'recentTransactionHistory']);
         Route::get('/stock-level', [Dashboard1RevisionController::class, 'stockLevelTable']);
         Route::get('/stock-level-by-customer', [Dashboard1RevisionController::class, 'stockLevelByCustomer']);
+        Route::get('/rm-stock-level-detail', [Dashboard1RevisionController::class, 'rawMaterialStockLevelDetail']);
         Route::get('/all-data', [Dashboard1RevisionController::class, 'getAllData']);
     });
 

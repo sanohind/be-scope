@@ -275,25 +275,92 @@ class DailyUseWhController extends ApiController
 
     /**
      * Get DailyUseWh data with optional filters
+     * Returns data in horizontal format (like Excel) grouped by partno, warehouse, year, and period
      */
     public function index(Request $request): JsonResponse
     {
         $query = DailyUseWh::query();
 
-        if ($request->has('plan_date')) {
-            $query->where('plan_date', Carbon::parse($request->input('plan_date'))->format('Y-m-d'));
-        }
-
+        // Filters
         if ($request->has('partno')) {
             $query->where('partno', $request->input('partno'));
         }
 
-        $perPage = min(100, max(10, (int) $request->input('per_page', 50)));
-        $data = $query->orderBy('plan_date', 'desc')
-            ->orderBy('partno')
-            ->paginate($perPage);
+        if ($request->has('warehouse')) {
+            $query->where('warehouse', $request->input('warehouse'));
+        }
 
-        return $this->sendResponse($data, 'Data berhasil diambil');
+        if ($request->has('plan_date')) {
+            $planDate = Carbon::parse($request->input('plan_date'))->format('Y-m-d');
+            $query->where('plan_date', $planDate);
+        }
+
+        if ($request->has('plan_date_from')) {
+            $planDateFrom = Carbon::parse($request->input('plan_date_from'))->format('Y-m-d');
+            $query->where('plan_date', '>=', $planDateFrom);
+        }
+
+        if ($request->has('plan_date_to')) {
+            $planDateTo = Carbon::parse($request->input('plan_date_to'))->format('Y-m-d');
+            $query->where('plan_date', '<=', $planDateTo);
+        }
+
+        // Get all matching records
+        $records = $query->orderBy('plan_date')
+            ->orderBy('partno')
+            ->orderBy('warehouse')
+            ->get();
+
+        // Group data by partno, warehouse, year, and period
+        $grouped = [];
+        foreach ($records as $record) {
+            $planDate = Carbon::parse($record->plan_date);
+            $year = $planDate->year;
+            $period = $planDate->month;
+            $day = $planDate->day;
+
+            $key = "{$record->partno}|{$record->warehouse}|{$year}|{$period}";
+
+            if (!isset($grouped[$key])) {
+                $grouped[$key] = [
+                    'partno' => $record->partno,
+                    'warehouse' => $record->warehouse,
+                    'year' => $year,
+                    'period' => $period,
+                    'days' => [],
+                ];
+            }
+
+            $grouped[$key]['days'][$day] = $record->daily_use;
+        }
+
+        // Convert to indexed array
+        $result = array_values($grouped);
+
+        // Manual pagination
+        $perPage = min(100, max(10, (int) $request->input('per_page', 50)));
+        $page = max(1, (int) $request->input('page', 1));
+        $total = count($result);
+        $lastPage = (int) ceil($total / $perPage);
+        $offset = ($page - 1) * $perPage;
+        $items = array_slice($result, $offset, $perPage);
+
+        $paginatedData = [
+            'current_page' => $page,
+            'data' => $items,
+            'first_page_url' => $request->url() . '?page=1',
+            'from' => $offset + 1,
+            'last_page' => $lastPage,
+            'last_page_url' => $request->url() . '?page=' . $lastPage,
+            'next_page_url' => $page < $lastPage ? $request->url() . '?page=' . ($page + 1) : null,
+            'path' => $request->url(),
+            'per_page' => $perPage,
+            'prev_page_url' => $page > 1 ? $request->url() . '?page=' . ($page - 1) : null,
+            'to' => min($offset + $perPage, $total),
+            'total' => $total,
+        ];
+
+        return $this->sendResponse($paginatedData, 'Data berhasil diambil');
     }
 
     /**
