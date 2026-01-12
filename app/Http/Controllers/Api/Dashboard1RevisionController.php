@@ -631,7 +631,7 @@ class Dashboard1RevisionController extends ApiController
 
                 $partno = trim((string) $row->partno);
                 $onhand = (float) ($row->onhand ?? 0);
-                $dailyUse = $partnoDailyUseMap[$partno] ?? 0;
+                $dailyUse = (float) ($partnoDailyUseMap[$partno] ?? 0);
 
                 // Calculate estimatedConsumption
                 if ($dailyUse > 0) {
