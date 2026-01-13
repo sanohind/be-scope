@@ -14,12 +14,15 @@ class DailyUseWh extends Model
     protected $fillable = [
         'partno',
         'warehouse',
-        'daily_use',
-        'plan_date',
+        'year',
+        'period',
+        'qty',
     ];
 
     protected $casts = [
-        'plan_date' => 'date:Y-m-d',
+        'year' => 'integer',
+        'period' => 'integer',
+        'qty' => 'integer',
     ];
 }
 

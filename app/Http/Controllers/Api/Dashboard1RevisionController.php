@@ -279,6 +279,62 @@ class Dashboard1RevisionController extends ApiController
     }
 
     /**
+     * Get DailyUseWh data for a date range
+     * Converts date range to year/period queries since DailyUseWh now uses year/period format
+     * Returns collection with partno => qty mapping (qty applies to all days in the month)
+     */
+    private function getDailyUseDataForDateRange(string $warehouse, $dateFrom, $dateTo): array
+    {
+        // Parse dates
+        $dateFromCarbon = is_string($dateFrom) ? Carbon::parse($dateFrom) : $dateFrom;
+        $dateToCarbon = is_string($dateTo) ? Carbon::parse($dateTo) : $dateTo;
+
+        // Get all year/period combinations in the date range
+        $yearPeriods = [];
+        $current = $dateFromCarbon->copy()->startOfMonth();
+        $end = $dateToCarbon->copy()->endOfMonth();
+
+        while ($current->lte($end)) {
+            $yearPeriods[] = [
+                'year' => $current->year,
+                'period' => $current->month
+            ];
+            $current->addMonth();
+        }
+
+        // Query DailyUseWh for these year/period combinations
+        $dailyUseQuery = DailyUseWh::whereNotNull('partno')
+            ->where('warehouse', $warehouse)
+            ->where(function($q) use ($yearPeriods) {
+                foreach ($yearPeriods as $yp) {
+                    $q->orWhere(function($subQ) use ($yp) {
+                        $subQ->where('year', $yp['year'])
+                             ->where('period', $yp['period']);
+                    });
+                }
+            });
+
+        $dailyUseData = $dailyUseQuery->get();
+
+        // Build partno => qty mapping
+        // Note: qty applies to ALL days in the month
+        $partnoDailyUseMap = [];
+        foreach ($dailyUseData as $dailyUseItem) {
+            $partno = trim((string) ($dailyUseItem->partno ?? ''));
+            $qty = (float) ($dailyUseItem->qty ?? 0);
+            if ($partno !== '') {
+                // If multiple periods exist for same partno, sum them
+                if (!isset($partnoDailyUseMap[$partno])) {
+                    $partnoDailyUseMap[$partno] = 0;
+                }
+                $partnoDailyUseMap[$partno] += $qty;
+            }
+        }
+
+        return $partnoDailyUseMap;
+    }
+
+    /**
      * CHART 1: Comprehensive KPI Cards
      * 6 metrics combining stock + transaction data
      * DATE FILTER: Applied to transaction metrics only
@@ -342,40 +398,46 @@ class Dashboard1RevisionController extends ApiController
                     $planDateRange = null;
 
                     if ($useExactPlanDate) {
-                        $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+                        $planDateParsed = Carbon::parse($planDate);
                     } elseif ($usePlanDateRange) {
                         // Use date range when plan_date not provided
-                        $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
-                        $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                        $from = $planDateFrom ? Carbon::parse($planDateFrom) : null;
+                        $to = $planDateTo ? Carbon::parse($planDateTo) : null;
                         // Fall back to dateRange if not provided
                         if (!$from) {
-                            $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                            $from = Carbon::parse(substr($dateRange['date_from'], 0, 10));
                         }
                         if (!$to) {
-                            $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                            $to = Carbon::parse(substr($dateRange['date_to'], 0, 10));
                         }
                         $planDateRange = [$from, $to];
                     }
 
-                    // Get DailyUseWh data for the plan_date
-                    $dailyUseQuery = DailyUseWh::whereNotNull('partno')
-                        ->where('warehouse', $warehouse);
-
+                    // Get DailyUseWh data using new year/period structure
+                    $partnoDailyUseMap = [];
                     if ($useExactPlanDate) {
-                        $dailyUseQuery->where('plan_date', $planDateParsed);
+                        // For exact date, get the month's data
+                        $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                            $warehouse,
+                            $planDateParsed->startOfMonth(),
+                            $planDateParsed->endOfMonth()
+                        );
                     } elseif ($planDateRange) {
-                        $dailyUseQuery->whereBetween('plan_date', $planDateRange);
+                        // For date range
+                        $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                            $warehouse,
+                            $planDateRange[0],
+                            $planDateRange[1]
+                        );
                     }
 
-                    $dailyUseData = $dailyUseQuery->get();
-
-                    if ($dailyUseData->isNotEmpty()) {
+                    if (!empty($partnoDailyUseMap)) {
                         // Get stock items with their partno and onhand
                         $stockItems = (clone $stockQuery)
                             ->select('partno', 'onhand')
                             ->get();
 
-                        // Build mapping: partno -> onhand
+                        // Build mapping: partno => onhand
                         $partnoOnhandMap = [];
                         foreach ($stockItems as $item) {
                             $partno = trim((string) $item->partno);
@@ -385,18 +447,7 @@ class Dashboard1RevisionController extends ApiController
                         }
 
                         // Calculate critical items based on estimatedConsumption
-                        $partnoProcessed = [];
-                        foreach ($dailyUseData as $dailyUseItem) {
-                            $partno = trim((string) ($dailyUseItem->partno ?? ''));
-                            $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
-
-                            // Skip if already processed or invalid
-                            if ($partno === '' || isset($partnoProcessed[$partno])) {
-                                continue;
-                            }
-
-                            $partnoProcessed[$partno] = true;
-
+                        foreach ($partnoDailyUseMap as $partno => $dailyUse) {
                             // Get onhand for this partno
                             $onhand = $partnoOnhandMap[$partno] ?? 0;
 
@@ -547,42 +598,33 @@ class Dashboard1RevisionController extends ApiController
             $planDateRange = null;
 
             if ($useExactPlanDate) {
-                $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+                $planDateParsed = Carbon::parse($planDate);
             } elseif ($usePlanDateRange) {
-                $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
-                $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                $from = $planDateFrom ? Carbon::parse($planDateFrom) : null;
+                $to = $planDateTo ? Carbon::parse($planDateTo) : null;
                 if (!$from) {
-                    $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                    $from = Carbon::parse(substr($dateRange['date_from'], 0, 10));
                 }
                 if (!$to) {
-                    $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                    $to = Carbon::parse(substr($dateRange['date_to'], 0, 10));
                 }
                 $planDateRange = [$from, $to];
             }
 
-            // Get DailyUseWh data
-            $dailyUseQuery = DailyUseWh::whereNotNull('partno')
-                ->where('warehouse', $warehouse);
-
-            if ($useExactPlanDate) {
-                $dailyUseQuery->where('plan_date', $planDateParsed);
-            } elseif ($planDateRange) {
-                $dailyUseQuery->whereBetween('plan_date', $planDateRange);
-            }
-
-            $dailyUseData = $dailyUseQuery->get();
-
-            // Build partno -> daily_use mapping
+            // Get DailyUseWh data using new year/period structure
             $partnoDailyUseMap = [];
-            foreach ($dailyUseData as $dailyUseItem) {
-                $partno = trim((string) ($dailyUseItem->partno ?? ''));
-                $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
-                if ($partno !== '') {
-                    if (!isset($partnoDailyUseMap[$partno])) {
-                        $partnoDailyUseMap[$partno] = 0;
-                    }
-                    $partnoDailyUseMap[$partno] += $dailyUse;
-                }
+            if ($useExactPlanDate) {
+                $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                    $warehouse,
+                    $planDateParsed->startOfMonth(),
+                    $planDateParsed->endOfMonth()
+                );
+            } elseif ($planDateRange) {
+                $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                    $warehouse,
+                    $planDateRange[0],
+                    $planDateRange[1]
+                );
             }
 
             // Get stock data with partno and onhand
@@ -1856,31 +1898,36 @@ class Dashboard1RevisionController extends ApiController
                     $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
                 } elseif ($usePlanDateRange) {
                     // Use date range when plan_date not provided
-                    $from = $planDateFrom ? Carbon::parse($planDateFrom)->format('Y-m-d') : null;
-                    $to = $planDateTo ? Carbon::parse($planDateTo)->format('Y-m-d') : null;
+                    $from = $planDateFrom ? Carbon::parse($planDateFrom) : null;
+                    $to = $planDateTo ? Carbon::parse($planDateTo) : null;
                     // Fall back to dateRange (already computed) if not provided
                     if (!$from) {
-                        $from = Carbon::parse(substr($dateRange['date_from'], 0, 10))->format('Y-m-d');
+                        $from = Carbon::parse(substr($dateRange['date_from'], 0, 10));
                     }
                     if (!$to) {
-                        $to = Carbon::parse(substr($dateRange['date_to'], 0, 10))->format('Y-m-d');
+                        $to = Carbon::parse(substr($dateRange['date_to'], 0, 10));
                     }
                     $planDateRange = [$from, $to];
                 }
 
-                // Get all DailyUseWh data for the plan_date
-                $dailyUseQuery = DailyUseWh::whereNotNull('partno')
-                    ->where('warehouse', $warehouse);
-
+                // Get DailyUseWh data using new year/period structure
+                $partnoDailyUseMap = [];
                 if ($useExactPlanDate) {
-                    $dailyUseQuery->where('plan_date', $planDateParsed);
+                    $planDateCarbon = Carbon::parse($planDateParsed);
+                    $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                        $warehouse,
+                        $planDateCarbon->copy()->startOfMonth(),
+                        $planDateCarbon->copy()->endOfMonth()
+                    );
                 } elseif ($planDateRange) {
-                    $dailyUseQuery->whereBetween('plan_date', $planDateRange);
+                    $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                        $warehouse,
+                        $planDateRange[0],
+                        $planDateRange[1]
+                    );
                 }
 
-                $dailyUseData = $dailyUseQuery->get();
-
-                if ($dailyUseData->isNotEmpty()) {
+                if (!empty($partnoDailyUseMap)) {
                     // Get all partno and their group_type_desc from StockByWh
                     // Use the same base query to ensure consistency
                     $stockQuery = $connection
@@ -1929,11 +1976,7 @@ class Dashboard1RevisionController extends ApiController
 
                     // Calculate total daily_use per group_type_desc
                     $groupDailyUseMap = [];
-                    foreach ($dailyUseData as $dailyUseItem) {
-                        // Convert partno to string for matching
-                        $partno = trim((string) ($dailyUseItem->partno ?? ''));
-                        $dailyUse = (int) ($dailyUseItem->daily_use ?? 0);
-
+                    foreach ($partnoDailyUseMap as $partno => $dailyUse) {
                         // Default to 0 if daily_use is null or invalid
                         if ($dailyUse < 0) {
                             $dailyUse = 0;
@@ -2237,25 +2280,12 @@ class Dashboard1RevisionController extends ApiController
             }
         }
 
-        // Get DailyUseWh data for the date range
-        $dailyUseQuery = DailyUseWh::whereNotNull('partno')
-            ->where('warehouse', $warehouse)
-            ->whereBetween('plan_date', [$dateFromParsed, $dateToParsed]);
-
-        $dailyUseData = $dailyUseQuery->get();
-
-        // Build partno -> daily_use mapping (sum if multiple dates)
-        $partnoDailyUseMap = [];
-        foreach ($dailyUseData as $dailyUseItem) {
-            $partno = trim((string) ($dailyUseItem->partno ?? ''));
-            $dailyUse = (float) ($dailyUseItem->daily_use ?? 0);
-            if ($partno !== '') {
-                if (!isset($partnoDailyUseMap[$partno])) {
-                    $partnoDailyUseMap[$partno] = 0;
-                }
-                $partnoDailyUseMap[$partno] += $dailyUse;
-            }
-        }
+        // Get DailyUseWh data for the date range using new year/period structure
+        $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+            $warehouse,
+            $dateFromParsed,
+            $dateToParsed
+        );
 
         // Process stock data and add daily_use and estimatedConsumption
         $processedData = [];

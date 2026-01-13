@@ -457,8 +457,8 @@ class DailyStockController extends Controller
                 return [$periodKey => $item];
             });
 
-            // Fill missing periods with zero values
-            $filledData = collect($allPeriods)->map(function ($periodValue) use ($dataByPeriod, $warehouseCode, $period, $granularity) {
+            // Fill missing periods - use previous day's data for today and future dates
+            $filledData = collect($allPeriods)->map(function ($periodValue, $index) use ($dataByPeriod, $warehouseCode, $period, $granularity, $allPeriods) {
                 $existing = $dataByPeriod->get($periodValue);
 
                 if ($existing) {
@@ -503,13 +503,47 @@ class DailyStockController extends Controller
                         'adjustment' => (int) $adjustment,
                     ];
                 } else {
-                    // Fill with zero values for missing periods
+                    // No data exists for this period
                     $periodDate = match($period) {
                         'daily' => Carbon::parse($periodValue),
                         'monthly' => Carbon::createFromFormat('Y-m', $periodValue)->startOfMonth(),
                         'yearly' => Carbon::createFromFormat('Y', $periodValue)->startOfYear(),
                         default => Carbon::parse($periodValue),
                     };
+
+                    // Check if this period is today or in the future
+                    $now = Carbon::now();
+                    $isTodayOrFuture = $periodDate->greaterThanOrEqualTo($now->copy()->startOfDay());
+
+                    // Default values
+                    $onhand = 0;
+                    $receipt = 0;
+                    $issue = 0;
+                    $adjustment = 0;
+
+                    // If it's today or future date, only use previous period's data for ONHAND
+                    // Receipt, issue, and adjustment remain 0 as they haven't occurred yet
+                    if ($isTodayOrFuture && $index > 0) {
+                        // Get previous period value
+                        $previousPeriodValue = $allPeriods[$index - 1];
+                        $previousData = $dataByPeriod->get($previousPeriodValue);
+
+                        if ($previousData) {
+                            // Use previous period's onhand data only
+                            $onhand = $previousData->onhand_total ?? $previousData->getAttribute('onhand_total') ?? 0;
+                        } else {
+                            // If previous period also doesn't have data, look for the most recent available onhand data
+                            for ($i = $index - 1; $i >= 0; $i--) {
+                                $lookbackPeriodValue = $allPeriods[$i];
+                                $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
+                                
+                                if ($lookbackData) {
+                                    $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
+                                    break;
+                                }
+                            }
+                        }
+                    }
 
                     return [
                         'period' => $periodValue,
@@ -522,10 +556,10 @@ class DailyStockController extends Controller
                         },
                         'granularity' => $granularity,
                         'warehouse' => $warehouseCode,
-                        'onhand' => 0,
-                        'receipt' => 0,
-                        'issue' => 0,
-                        'adjustment' => 0,
+                        'onhand' => (int) $onhand,
+                        'receipt' => (int) $receipt,
+                        'issue' => (int) $issue,
+                        'adjustment' => (int) $adjustment,
                     ];
                 }
             })->values();

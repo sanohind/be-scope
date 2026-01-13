@@ -8,30 +8,57 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use PhpOffice\PhpSpreadsheet\IOFactory;
-use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
 class DailyUseWhController extends ApiController
 {
+    /**
+     * Import DailyUseWh data from Excel file
+     * New format: partno, warehouse, year, period, qty
+     * The qty value will apply to all days in the specified month
+     */
     public function import(Request $request): JsonResponse
     {
-        $request->validate([
-            'file' => 'required|file|mimes:xlsx,xls,csv',
-        ]);
+        try {
+            $request->validate([
+                'file' => 'required|file|mimes:xlsx,xls,csv',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return $this->sendError('Validasi file gagal', [
+                'errors' => $e->errors(),
+                'message' => 'File harus berformat Excel (.xlsx, .xls) atau CSV (.csv)'
+            ], 422);
+        }
 
         $file = $request->file('file');
 
         try {
-            $spreadsheet = IOFactory::load($file->getRealPath());
+            // Load spreadsheet
+            try {
+                $spreadsheet = IOFactory::load($file->getRealPath());
+            } catch (\Exception $e) {
+                return $this->sendError('Gagal membaca file Excel', [
+                    'error' => 'File tidak dapat dibaca atau format tidak valid',
+                    'detail' => $e->getMessage()
+                ], 422);
+            }
+
             $sheet = $spreadsheet->getActiveSheet();
             $rows = $sheet->toArray(null, true, true, true);
 
             if (empty($rows)) {
-                return $this->sendError('File kosong', [], 422);
+                return $this->sendError('File kosong', [
+                    'error' => 'File Excel tidak berisi data'
+                ], 422);
             }
 
             // Skip header rows (row 1-3), data starts from row 4
-            // Remove rows 1, 2, 3
             unset($rows[1], $rows[2], $rows[3]);
+
+            if (empty($rows)) {
+                return $this->sendError('Tidak ada data untuk diproses', [
+                    'error' => 'File hanya berisi header, tidak ada data di baris 4 ke bawah'
+                ], 422);
+            }
 
             $now = Carbon::now();
             $inserts = [];
@@ -41,97 +68,79 @@ class DailyUseWhController extends ApiController
             $skipped = 0;
             $errors = [];
 
-            // Fixed column positions (updated format)
+            // Column positions
             $PARTNO_COL = 'B';
-            $WAREHOUSE_COL = 'C';  // New column for warehouse
-            $YEAR_COL = 'D';       // Moved from C to D
-            $PERIOD_COL = 'E';     // Moved from D to E
-            $FIRST_DAY_COL = 'F';  // Column F = day 1 (moved from E to F)
+            $WAREHOUSE_COL = 'C';
+            $YEAR_COL = 'D';
+            $PERIOD_COL = 'E';
+            $QTY_COL = 'F';
 
             foreach ($rows as $rowIndex => $row) {
-                // Get partno, warehouse, year, period from fixed columns
-                $partno = $row[$PARTNO_COL] ?? null;
-                $warehouse = $row[$WAREHOUSE_COL] ?? null;
-                $year = $row[$YEAR_COL] ?? null;
-                $period = $row[$PERIOD_COL] ?? null;
+                try {
+                    // Get values from columns
+                    $partno = $row[$PARTNO_COL] ?? null;
+                    $warehouse = $row[$WAREHOUSE_COL] ?? null;
+                    $year = $row[$YEAR_COL] ?? null;
+                    $period = $row[$PERIOD_COL] ?? null;
+                    $qty = $row[$QTY_COL] ?? null;
 
-                // Skip if all required fields are empty
-                if (empty($partno) && empty($warehouse) && empty($year) && empty($period)) {
-                    continue;
-                }
-
-                // Validate and parse partno
-                $partnoTrimmed = !empty($partno) ? trim((string) $partno) : null;
-                if (empty($partnoTrimmed)) {
-                    $errors[] = "Row {$rowIndex}: partno kosong";
-                    $skipped++;
-                    continue;
-                }
-
-                // Validate and parse warehouse
-                $warehouseTrimmed = !empty($warehouse) ? trim((string) $warehouse) : null;
-                if (empty($warehouseTrimmed)) {
-                    $errors[] = "Row {$rowIndex}: warehouse kosong";
-                    $skipped++;
-                    continue;
-                }
-
-                // Validate and parse year
-                $yearParsed = !empty($year) ? (int) $year : null;
-                if ($yearParsed === null || $yearParsed < 2000 || $yearParsed > 2100) {
-                    $errors[] = "Row {$rowIndex}: year tidak valid ({$year})";
-                    $skipped++;
-                    continue;
-                }
-
-                // Validate and parse period (month)
-                $periodParsed = !empty($period) ? (int) $period : null;
-                if ($periodParsed === null || $periodParsed < 1 || $periodParsed > 12) {
-                    $errors[] = "Row {$rowIndex}: period tidak valid ({$period})";
-                    $skipped++;
-                    continue;
-                }
-
-                // Get number of days in this month
-                $daysInMonth = Carbon::create($yearParsed, $periodParsed, 1)->daysInMonth;
-
-                // Loop through each day (columns F, G, H, ... for day 1, 2, 3, ...)
-                for ($day = 1; $day <= $daysInMonth; $day++) {
-                    // Calculate column letter for this day
-                    // F = day 1, G = day 2, H = day 3, etc.
-                    // Column F is the 6th column (A=1, B=2, C=3, D=4, E=5, F=6)
-                    $columnIndex = 5 + $day; // F=6, G=7, H=8, etc.
-                    $columnLetter = $this->getColumnLetter($columnIndex);
-
-                    // Get daily_use value from the cell
-                    $dailyUse = $row[$columnLetter] ?? null;
-
-                    // Parse daily_use as integer, default to 0 if empty
-                    if ($dailyUse === null || $dailyUse === '') {
-                        $dailyUseParsed = 0;
-                    } else {
-                        $dailyUseParsed = (int) $dailyUse;
-                    }
-
-                    // Construct plan_date from year + period + day
-                    try {
-                        $planDate = Carbon::create($yearParsed, $periodParsed, $day)->format('Y-m-d');
-                    } catch (\Throwable $e) {
-                        $errors[] = "Row {$rowIndex}, Day {$day}: tanggal tidak valid ({$yearParsed}-{$periodParsed}-{$day})";
+                    // Skip if all required fields are empty
+                    if (empty($partno) && empty($warehouse) && empty($year) && empty($period)) {
                         continue;
                     }
 
-                    // Check if record with same partno, warehouse, and plan_date exists
+                    // Validate partno
+                    $partnoTrimmed = !empty($partno) ? trim((string) $partno) : null;
+                    if (empty($partnoTrimmed)) {
+                        $errors[] = "Baris {$rowIndex}: Part Number (kolom B) kosong";
+                        $skipped++;
+                        continue;
+                    }
+
+                    // Validate warehouse
+                    $warehouseTrimmed = !empty($warehouse) ? trim((string) $warehouse) : null;
+                    if (empty($warehouseTrimmed)) {
+                        $errors[] = "Baris {$rowIndex}: Warehouse (kolom C) kosong";
+                        $skipped++;
+                        continue;
+                    }
+
+                    // Validate year
+                    $yearParsed = !empty($year) ? (int) $year : null;
+                    if ($yearParsed === null || $yearParsed < 2000 || $yearParsed > 2100) {
+                        $errors[] = "Baris {$rowIndex}: Year (kolom D) tidak valid. Nilai: '{$year}'. Harus antara 2000-2100";
+                        $skipped++;
+                        continue;
+                    }
+
+                    // Validate period (month)
+                    $periodParsed = !empty($period) ? (int) $period : null;
+                    if ($periodParsed === null || $periodParsed < 1 || $periodParsed > 12) {
+                        $errors[] = "Baris {$rowIndex}: Period (kolom E) tidak valid. Nilai: '{$period}'. Harus antara 1-12 (Januari-Desember)";
+                        $skipped++;
+                        continue;
+                    }
+
+                    // Parse qty, default to 0 if empty
+                    $qtyParsed = ($qty === null || $qty === '') ? 0 : (int) $qty;
+                    if ($qtyParsed < 0) {
+                        $errors[] = "Baris {$rowIndex}: Qty (kolom F) tidak boleh negatif. Nilai: '{$qty}'";
+                        $skipped++;
+                        continue;
+                    }
+
+                    // Check if record exists
                     $existingRecord = DailyUseWh::where('partno', $partnoTrimmed)
                         ->where('warehouse', $warehouseTrimmed)
-                        ->where('plan_date', $planDate)
+                        ->where('year', $yearParsed)
+                        ->where('period', $periodParsed)
                         ->first();
 
                     if ($existingRecord) {
                         // Update existing record
                         $updates[] = [
                             'id' => $existingRecord->id,
-                            'daily_use' => $dailyUseParsed,
+                            'qty' => $qtyParsed,
                             'updated_at' => $now,
                         ];
                     } else {
@@ -139,80 +148,107 @@ class DailyUseWhController extends ApiController
                         $inserts[] = [
                             'partno' => $partnoTrimmed,
                             'warehouse' => $warehouseTrimmed,
-                            'daily_use' => $dailyUseParsed,
-                            'plan_date' => $planDate,
+                            'year' => $yearParsed,
+                            'period' => $periodParsed,
+                            'qty' => $qtyParsed,
                             'created_at' => $now,
                             'updated_at' => $now,
                         ];
                     }
+                } catch (\Exception $e) {
+                    $errors[] = "Baris {$rowIndex}: Error tidak terduga - " . $e->getMessage();
+                    $skipped++;
+                    continue;
                 }
             }
 
             if (empty($inserts) && empty($updates)) {
-                $errorMessage = 'Tidak ada data yang diproses';
+                $errorMessage = 'Tidak ada data yang dapat diproses';
+                $errorDetails = [
+                    'total_rows' => count($rows),
+                    'skipped' => $skipped,
+                    'errors' => array_slice($errors, 0, 20) // Show first 20 errors
+                ];
+                
                 if (!empty($errors)) {
-                    $errorMessage .= '. Errors: ' . implode('; ', array_slice($errors, 0, 5));
-                }
-                return $this->sendError($errorMessage, ['errors' => $errors], 422);
-            }
-
-            DB::transaction(function () use ($inserts, $updates, &$inserted, &$updated) {
-                if (!empty($inserts)) {
-                    DailyUseWh::insert($inserts);
-                    $inserted = count($inserts);
+                    $errorMessage .= '. Silakan periksa format data Excel Anda.';
                 }
                 
-                foreach ($updates as $updateData) {
-                    $id = $updateData['id'];
-                    unset($updateData['id']);
-                    DailyUseWh::where('id', $id)->update($updateData);
-                    $updated++;
-                }
-            });
+                return $this->sendError($errorMessage, $errorDetails, 422);
+            }
+
+            // Execute database operations
+            try {
+                DB::transaction(function () use ($inserts, $updates, &$inserted, &$updated) {
+                    if (!empty($inserts)) {
+                        DailyUseWh::insert($inserts);
+                        $inserted = count($inserts);
+                    }
+                    
+                    foreach ($updates as $updateData) {
+                        $id = $updateData['id'];
+                        unset($updateData['id']);
+                        DailyUseWh::where('id', $id)->update($updateData);
+                        $updated++;
+                    }
+                });
+            } catch (\Exception $e) {
+                return $this->sendError('Gagal menyimpan data ke database', [
+                    'error' => $e->getMessage(),
+                    'inserted_before_error' => $inserted,
+                    'updated_before_error' => $updated
+                ], 500);
+            }
 
             $response = [
                 'inserted' => $inserted,
                 'updated' => $updated,
                 'skipped' => $skipped,
+                'total_processed' => $inserted + $updated,
             ];
 
             if (!empty($errors)) {
-                $response['errors'] = array_slice($errors, 0, 10); // Limit to first 10 errors
+                $response['errors'] = array_slice($errors, 0, 20); // Limit to first 20 errors
+                $response['total_errors'] = count($errors);
+                if (count($errors) > 20) {
+                    $response['error_note'] = 'Menampilkan 20 error pertama dari total ' . count($errors) . ' error';
+                }
             }
 
-            return $this->sendResponse($response, 'Import berhasil');
-        } catch (\Throwable $e) {
-            return $this->sendError('Gagal memproses file: ' . $e->getMessage(), [], 500);
+            $message = 'Import berhasil';
+            if ($skipped > 0) {
+                $message .= " dengan {$skipped} baris dilewati";
+            }
+
+            return $this->sendResponse($response, $message);
+            
+        } catch (\Exception $e) {
+            return $this->sendError('Gagal memproses file', [
+                'error' => 'Terjadi kesalahan saat memproses file Excel',
+                'detail' => $e->getMessage(),
+                'trace' => config('app.debug') ? $e->getTraceAsString() : null
+            ], 500);
         }
     }
 
     /**
-     * Convert column index to Excel column letter
-     * Example: 1 => A, 2 => B, 27 => AA, etc.
-     */
-    private function getColumnLetter(int $columnIndex): string
-    {
-        $columnLetter = '';
-        while ($columnIndex > 0) {
-            $modulo = ($columnIndex - 1) % 26;
-            $columnLetter = chr(65 + $modulo) . $columnLetter;
-            $columnIndex = (int)(($columnIndex - $modulo) / 26);
-        }
-        return $columnLetter;
-    }
-
-    /**
-     * Create/Insert DailyUseWh data via API body (for testing)
+     * Create/Insert DailyUseWh data via API body
      * Accepts single record or array of records
      */
     public function store(Request $request): JsonResponse
     {
-        $request->validate([
-            'data' => 'required|array',
-            'data.*.partno' => 'required|string|max:100',
-            'data.*.daily_use' => 'required|integer|min:0',
-            'data.*.plan_date' => 'required|date',
-        ]);
+        try {
+            $request->validate([
+                'data' => 'required|array',
+                'data.*.partno' => 'required|string|max:100',
+                'data.*.warehouse' => 'required|string|max:100',
+                'data.*.year' => 'required|integer|min:2000|max:2100',
+                'data.*.period' => 'required|integer|min:1|max:12',
+                'data.*.qty' => 'required|integer|min:0',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return $this->sendError('Validasi gagal', $e->errors(), 422);
+        }
 
         try {
             $now = Carbon::now();
@@ -223,27 +259,33 @@ class DailyUseWhController extends ApiController
 
             foreach ($request->input('data') as $item) {
                 $partnoTrimmed = trim((string) $item['partno']);
-                $dailyUseParsed = (int) $item['daily_use'];
-                $planDateParsed = Carbon::parse($item['plan_date'])->format('Y-m-d');
+                $warehouseTrimmed = trim((string) $item['warehouse']);
+                $yearParsed = (int) $item['year'];
+                $periodParsed = (int) $item['period'];
+                $qtyParsed = (int) $item['qty'];
 
-                // Check if record with same partno and plan_date exists
+                // Check if record exists
                 $existingRecord = DailyUseWh::where('partno', $partnoTrimmed)
-                    ->where('plan_date', $planDateParsed)
+                    ->where('warehouse', $warehouseTrimmed)
+                    ->where('year', $yearParsed)
+                    ->where('period', $periodParsed)
                     ->first();
 
                 if ($existingRecord) {
                     // Update existing record
                     $updates[] = [
                         'id' => $existingRecord->id,
-                        'daily_use' => $dailyUseParsed,
+                        'qty' => $qtyParsed,
                         'updated_at' => $now,
                     ];
                 } else {
                     // Insert new record
                     $inserts[] = [
                         'partno' => $partnoTrimmed,
-                        'daily_use' => $dailyUseParsed,
-                        'plan_date' => $planDateParsed,
+                        'warehouse' => $warehouseTrimmed,
+                        'year' => $yearParsed,
+                        'period' => $periodParsed,
+                        'qty' => $qtyParsed,
                         'created_at' => $now,
                         'updated_at' => $now,
                     ];
@@ -268,14 +310,14 @@ class DailyUseWhController extends ApiController
                 'inserted' => $inserted,
                 'updated' => $updated,
             ], 'Data berhasil disimpan');
-        } catch (\Throwable $e) {
+        } catch (\Exception $e) {
             return $this->sendError('Gagal menyimpan data: ' . $e->getMessage(), [], 500);
         }
     }
 
     /**
      * Get DailyUseWh data with optional filters
-     * Returns data in horizontal format (like Excel) grouped by partno, warehouse, year, and period
+     * Returns data in simple format: partno, warehouse, year, period, qty
      */
     public function index(Request $request): JsonResponse
     {
@@ -283,82 +325,28 @@ class DailyUseWhController extends ApiController
 
         // Filters
         if ($request->has('partno')) {
-            $query->where('partno', $request->input('partno'));
+            $query->where('partno', 'like', '%' . $request->input('partno') . '%');
         }
 
         if ($request->has('warehouse')) {
             $query->where('warehouse', $request->input('warehouse'));
         }
 
-        if ($request->has('plan_date')) {
-            $planDate = Carbon::parse($request->input('plan_date'))->format('Y-m-d');
-            $query->where('plan_date', $planDate);
+        if ($request->has('year')) {
+            $query->where('year', (int) $request->input('year'));
         }
 
-        if ($request->has('plan_date_from')) {
-            $planDateFrom = Carbon::parse($request->input('plan_date_from'))->format('Y-m-d');
-            $query->where('plan_date', '>=', $planDateFrom);
+        if ($request->has('period')) {
+            $query->where('period', (int) $request->input('period'));
         }
 
-        if ($request->has('plan_date_to')) {
-            $planDateTo = Carbon::parse($request->input('plan_date_to'))->format('Y-m-d');
-            $query->where('plan_date', '<=', $planDateTo);
-        }
-
-        // Get all matching records
-        $records = $query->orderBy('plan_date')
+        // Pagination
+        $perPage = min(100, max(10, (int) $request->input('per_page', 50)));
+        $paginatedData = $query->orderBy('year', 'desc')
+            ->orderBy('period', 'desc')
             ->orderBy('partno')
             ->orderBy('warehouse')
-            ->get();
-
-        // Group data by partno, warehouse, year, and period
-        $grouped = [];
-        foreach ($records as $record) {
-            $planDate = Carbon::parse($record->plan_date);
-            $year = $planDate->year;
-            $period = $planDate->month;
-            $day = $planDate->day;
-
-            $key = "{$record->partno}|{$record->warehouse}|{$year}|{$period}";
-
-            if (!isset($grouped[$key])) {
-                $grouped[$key] = [
-                    'partno' => $record->partno,
-                    'warehouse' => $record->warehouse,
-                    'year' => $year,
-                    'period' => $period,
-                    'days' => [],
-                ];
-            }
-
-            $grouped[$key]['days'][$day] = $record->daily_use;
-        }
-
-        // Convert to indexed array
-        $result = array_values($grouped);
-
-        // Manual pagination
-        $perPage = min(100, max(10, (int) $request->input('per_page', 50)));
-        $page = max(1, (int) $request->input('page', 1));
-        $total = count($result);
-        $lastPage = (int) ceil($total / $perPage);
-        $offset = ($page - 1) * $perPage;
-        $items = array_slice($result, $offset, $perPage);
-
-        $paginatedData = [
-            'current_page' => $page,
-            'data' => $items,
-            'first_page_url' => $request->url() . '?page=1',
-            'from' => $offset + 1,
-            'last_page' => $lastPage,
-            'last_page_url' => $request->url() . '?page=' . $lastPage,
-            'next_page_url' => $page < $lastPage ? $request->url() . '?page=' . ($page + 1) : null,
-            'path' => $request->url(),
-            'per_page' => $perPage,
-            'prev_page_url' => $page > 1 ? $request->url() . '?page=' . ($page - 1) : null,
-            'to' => min($offset + $perPage, $total),
-            'total' => $total,
-        ];
+            ->paginate($perPage);
 
         return $this->sendResponse($paginatedData, 'Data berhasil diambil');
     }
@@ -380,7 +368,6 @@ class DailyUseWhController extends ApiController
 
     /**
      * Update DailyUseWh record by ID
-     * Accepts partial or full update
      */
     public function update(Request $request, $id): JsonResponse
     {
@@ -389,48 +376,32 @@ class DailyUseWhController extends ApiController
 
             $request->validate([
                 'partno' => 'sometimes|required|string|max:100',
-                'daily_use' => 'sometimes|required|integer|min:0',
-                'plan_date' => 'sometimes|required|date',
+                'warehouse' => 'sometimes|required|string|max:100',
+                'year' => 'sometimes|required|integer|min:2000|max:2100',
+                'period' => 'sometimes|required|integer|min:1|max:12',
+                'qty' => 'sometimes|required|integer|min:0',
             ]);
 
             $updateData = [];
 
-            // Update partno jika ada
             if ($request->has('partno')) {
                 $updateData['partno'] = trim((string) $request->input('partno'));
             }
 
-            // Update daily_use jika ada
-            if ($request->has('daily_use')) {
-                $updateData['daily_use'] = (int) $request->input('daily_use');
+            if ($request->has('warehouse')) {
+                $updateData['warehouse'] = trim((string) $request->input('warehouse'));
             }
 
-            // Update plan_date jika ada
-            if ($request->has('plan_date')) {
-                $planDateRaw = $request->input('plan_date');
-                $planDate = null;
+            if ($request->has('year')) {
+                $updateData['year'] = (int) $request->input('year');
+            }
 
-                try {
-                    if (is_numeric($planDateRaw)) {
-                        // Format Excel numeric
-                        $planDate = Carbon::instance(ExcelDate::excelToDateTimeObject($planDateRaw))->format('Y-m-d');
-                    } else {
-                        // Try parsing dengan berbagai format
-                        $dateString = trim((string) $planDateRaw);
-                        
-                        // Format: DD/MM/YYYY atau DD-MM-YYYY
-                        if (preg_match('/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/', $dateString)) {
-                            $planDate = Carbon::createFromFormat('d/m/Y', str_replace('-', '/', $dateString))->format('Y-m-d');
-                        } else {
-                            // Format lainnya: YYYY-MM-DD, MM/DD/YYYY, dll
-                            $planDate = Carbon::parse($dateString)->format('Y-m-d');
-                        }
-                    }
-                } catch (\Throwable $e) {
-                    return $this->sendError('Format tanggal tidak valid', [], 422);
-                }
+            if ($request->has('period')) {
+                $updateData['period'] = (int) $request->input('period');
+            }
 
-                $updateData['plan_date'] = $planDate;
+            if ($request->has('qty')) {
+                $updateData['qty'] = (int) $request->input('qty');
             }
 
             if (empty($updateData)) {
@@ -500,4 +471,3 @@ class DailyUseWhController extends ApiController
         }
     }
 }
-
