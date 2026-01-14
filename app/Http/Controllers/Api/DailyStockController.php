@@ -535,23 +535,14 @@ class DailyStockController extends Controller
                     } else {
                         // No snapshot data - use previous period's onhand (H-1 logic)
                         if ($index > 0) {
-                            // Get previous period value
-                            $previousPeriodValue = $allPeriods[$index - 1];
-                            $previousData = $dataByPeriod->get($previousPeriodValue);
-
-                            if ($previousData) {
-                                // Use previous period's onhand data
-                                $onhand = $previousData->onhand_total ?? $previousData->getAttribute('onhand_total') ?? 0;
-                            } else {
-                                // If previous period also doesn't have data, look for the most recent available onhand data
-                                for ($i = $index - 1; $i >= 0; $i--) {
-                                    $lookbackPeriodValue = $allPeriods[$i];
-                                    $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
-                                    
-                                    if ($lookbackData && ($lookbackData->has_snapshot ?? $lookbackData->getAttribute('has_snapshot') ?? false)) {
-                                        $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
-                                        break;
-                                    }
+                            // Look for the most recent period with actual snapshot data
+                            for ($i = $index - 1; $i >= 0; $i--) {
+                                $lookbackPeriodValue = $allPeriods[$i];
+                                $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
+                                
+                                if ($lookbackData && ($lookbackData->has_snapshot ?? $lookbackData->getAttribute('has_snapshot') ?? false)) {
+                                    $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
+                                    break;
                                 }
                             }
                         }
@@ -573,23 +564,14 @@ class DailyStockController extends Controller
                     
                     // For today and future dates, use previous period's onhand data
                     if ($isTodayOrFuture && $index > 0) {
-                        // Get previous period value
-                        $previousPeriodValue = $allPeriods[$index - 1];
-                        $previousData = $dataByPeriod->get($previousPeriodValue);
-
-                        if ($previousData) {
-                            // Use previous period's onhand data only
-                            $onhand = $previousData->onhand_total ?? $previousData->getAttribute('onhand_total') ?? 0;
-                        } else {
-                            // If previous period also doesn't have data, look for the most recent available onhand data
-                            for ($i = $index - 1; $i >= 0; $i--) {
-                                $lookbackPeriodValue = $allPeriods[$i];
-                                $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
-                                
-                                if ($lookbackData && ($lookbackData->has_snapshot ?? $lookbackData->getAttribute('has_snapshot') ?? false)) {
-                                    $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
-                                    break;
-                                }
+                        // Look for the most recent period with actual snapshot data
+                        for ($i = $index - 1; $i >= 0; $i--) {
+                            $lookbackPeriodValue = $allPeriods[$i];
+                            $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
+                            
+                            if ($lookbackData && ($lookbackData->has_snapshot ?? $lookbackData->getAttribute('has_snapshot') ?? false)) {
+                                $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
+                                break;
                             }
                         }
                     }
