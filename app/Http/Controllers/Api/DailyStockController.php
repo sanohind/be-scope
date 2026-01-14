@@ -457,21 +457,46 @@ class DailyStockController extends Controller
                 return [$periodKey => $item];
             });
 
-            // Fill missing periods - use previous day's data for today and future dates
+            // Fill missing periods - use previous day's data for onhand when snapshot is missing
             $filledData = collect($allPeriods)->map(function ($periodValue, $index) use ($dataByPeriod, $warehouseCode, $period, $granularity, $allPeriods) {
                 $existing = $dataByPeriod->get($periodValue);
 
+                // Determine the period date for this period
+                $periodDate = match($period) {
+                    'daily' => Carbon::parse($periodValue),
+                    'monthly' => Carbon::createFromFormat('Y-m', $periodValue)->startOfMonth(),
+                    'yearly' => Carbon::createFromFormat('Y', $periodValue)->startOfYear(),
+                    default => Carbon::parse($periodValue),
+                };
+
+                // Check if snapshot data exists for this period (onhand_total > 0 or explicitly set)
+                $hasSnapshotData = $existing && isset($existing->onhand_total);
+                
+                // Check if this period is today or in the future
+                $now = Carbon::now();
+                $isTodayOrFuture = $periodDate->greaterThanOrEqualTo($now->copy()->startOfDay());
+
+                // Initialize default values
+                $onhand = 0;
+                $receipt = 0;
+                $issue = 0;
+                $adjustment = 0;
+
                 if ($existing) {
+                    // Data exists (could be from transactions or snapshot)
+                    
                     // Handle period_start and period_end - they might be strings from raw query or Carbon instances
                     $periodStart = $existing->period_start ?? $existing->getAttribute('period_start');
                     if (is_string($periodStart)) {
                         try {
                             $periodStart = Carbon::parse($periodStart);
                         } catch (\Exception $e) {
-                            $periodStart = null;
+                            $periodStart = $periodDate->copy()->startOfDay();
                         }
                     } elseif ($periodStart instanceof \DateTime) {
                         $periodStart = Carbon::instance($periodStart);
+                    } else {
+                        $periodStart = $periodDate->copy()->startOfDay();
                     }
 
                     $periodEnd = $existing->period_end ?? $existing->getAttribute('period_end');
@@ -479,22 +504,62 @@ class DailyStockController extends Controller
                         try {
                             $periodEnd = Carbon::parse($periodEnd);
                         } catch (\Exception $e) {
-                            $periodEnd = null;
+                            $periodEnd = match($period) {
+                                'daily' => $periodDate->copy()->endOfDay(),
+                                'monthly' => $periodDate->copy()->endOfMonth()->endOfDay(),
+                                'yearly' => $periodDate->copy()->endOfYear()->endOfDay(),
+                                default => $periodDate->copy()->endOfDay(),
+                            };
                         }
                     } elseif ($periodEnd instanceof \DateTime) {
                         $periodEnd = Carbon::instance($periodEnd);
+                    } else {
+                        $periodEnd = match($period) {
+                            'daily' => $periodDate->copy()->endOfDay(),
+                            'monthly' => $periodDate->copy()->endOfMonth()->endOfDay(),
+                            'yearly' => $periodDate->copy()->endOfYear()->endOfDay(),
+                            default => $periodDate->copy()->endOfDay(),
+                        };
                     }
 
-                    // Access aggregated values - try both property access and getAttribute
-                    $onhand = $existing->onhand_total ?? $existing->getAttribute('onhand_total') ?? 0;
+                    // Get transaction data (always use actual data if available)
                     $receipt = $existing->receipt_total ?? $existing->getAttribute('receipt_total') ?? 0;
                     $issue = $existing->issue_total ?? $existing->getAttribute('issue_total') ?? 0;
                     $adjustment = $existing->adjustment_total ?? $existing->getAttribute('adjustment_total') ?? 0;
 
+                    // For onhand: if snapshot data exists, use it; otherwise use H-1 data
+                    if ($hasSnapshotData) {
+                        // Snapshot data exists - use actual onhand
+                        $onhand = $existing->onhand_total ?? $existing->getAttribute('onhand_total') ?? 0;
+                    } else {
+                        // No snapshot data - use previous period's onhand (H-1 logic)
+                        if ($index > 0) {
+                            // Get previous period value
+                            $previousPeriodValue = $allPeriods[$index - 1];
+                            $previousData = $dataByPeriod->get($previousPeriodValue);
+
+                            if ($previousData) {
+                                // Use previous period's onhand data
+                                $onhand = $previousData->onhand_total ?? $previousData->getAttribute('onhand_total') ?? 0;
+                            } else {
+                                // If previous period also doesn't have data, look for the most recent available onhand data
+                                for ($i = $index - 1; $i >= 0; $i--) {
+                                    $lookbackPeriodValue = $allPeriods[$i];
+                                    $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
+                                    
+                                    if ($lookbackData && isset($lookbackData->onhand_total)) {
+                                        $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     return [
                         'period' => $periodValue,
-                        'period_start' => $periodStart ? $periodStart->toDateTimeString() : null,
-                        'period_end' => $periodEnd ? $periodEnd->toDateTimeString() : null,
+                        'period_start' => $periodStart->toDateTimeString(),
+                        'period_end' => $periodEnd->toDateTimeString(),
                         'granularity' => $existing->granularity ?? $granularity,
                         'warehouse' => $warehouseCode,
                         'onhand' => (int) $onhand,
@@ -503,26 +568,9 @@ class DailyStockController extends Controller
                         'adjustment' => (int) $adjustment,
                     ];
                 } else {
-                    // No data exists for this period
-                    $periodDate = match($period) {
-                        'daily' => Carbon::parse($periodValue),
-                        'monthly' => Carbon::createFromFormat('Y-m', $periodValue)->startOfMonth(),
-                        'yearly' => Carbon::createFromFormat('Y', $periodValue)->startOfYear(),
-                        default => Carbon::parse($periodValue),
-                    };
-
-                    // Check if this period is today or in the future
-                    $now = Carbon::now();
-                    $isTodayOrFuture = $periodDate->greaterThanOrEqualTo($now->copy()->startOfDay());
-
-                    // Default values
-                    $onhand = 0;
-                    $receipt = 0;
-                    $issue = 0;
-                    $adjustment = 0;
-
-                    // If it's today or future date, only use previous period's data for ONHAND
-                    // Receipt, issue, and adjustment remain 0 as they haven't occurred yet
+                    // No data exists for this period at all (no snapshot, no transactions)
+                    
+                    // For today and future dates, use previous period's onhand data
                     if ($isTodayOrFuture && $index > 0) {
                         // Get previous period value
                         $previousPeriodValue = $allPeriods[$index - 1];
@@ -537,7 +585,7 @@ class DailyStockController extends Controller
                                 $lookbackPeriodValue = $allPeriods[$i];
                                 $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
                                 
-                                if ($lookbackData) {
+                                if ($lookbackData && isset($lookbackData->onhand_total)) {
                                     $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
                                     break;
                                 }
