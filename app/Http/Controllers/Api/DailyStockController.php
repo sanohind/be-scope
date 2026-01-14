@@ -394,6 +394,7 @@ class DailyStockController extends Controller
                     default => $periodDate->copy()->endOfDay(),
                 },
                 'granularity' => $period,
+                'has_snapshot' => $onhandData !== null, // Flag to indicate if snapshot data exists
                 'onhand_total' => $onhandData ? (int)$onhandData->onhand_total : 0,
                 'receipt_total' => $receiptData ? (int)$receiptData->receipt_total : 0,
                 'issue_total' => $issueData ? (int)$issueData->issue_total : 0,
@@ -469,8 +470,8 @@ class DailyStockController extends Controller
                     default => Carbon::parse($periodValue),
                 };
 
-                // Check if snapshot data exists for this period (onhand_total > 0 or explicitly set)
-                $hasSnapshotData = $existing && isset($existing->onhand_total);
+                // Check if snapshot data exists for this period
+                $hasSnapshotData = $existing && ($existing->has_snapshot ?? $existing->getAttribute('has_snapshot') ?? false);
                 
                 // Check if this period is today or in the future
                 $now = Carbon::now();
@@ -547,7 +548,7 @@ class DailyStockController extends Controller
                                     $lookbackPeriodValue = $allPeriods[$i];
                                     $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
                                     
-                                    if ($lookbackData && isset($lookbackData->onhand_total)) {
+                                    if ($lookbackData && ($lookbackData->has_snapshot ?? $lookbackData->getAttribute('has_snapshot') ?? false)) {
                                         $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
                                         break;
                                     }
@@ -585,7 +586,7 @@ class DailyStockController extends Controller
                                 $lookbackPeriodValue = $allPeriods[$i];
                                 $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
                                 
-                                if ($lookbackData && isset($lookbackData->onhand_total)) {
+                                if ($lookbackData && ($lookbackData->has_snapshot ?? $lookbackData->getAttribute('has_snapshot') ?? false)) {
                                     $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
                                     break;
                                 }
