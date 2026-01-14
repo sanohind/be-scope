@@ -270,8 +270,9 @@ class DailyStockController extends Controller
         $snapshotDateFormat = $this->getSnapshotDateFormatByPeriod($period);
 
         // Query 1: Get onhand from StockByWhSnapshot
-        // Extended date range to include previous days (up to 30 days back) to ensure we have H-1 data
-        $extendedDateFrom = $dateRange['date_from_carbon']->copy()->subDays(30)->startOfDay();
+        // Extended date range to include previous days to ensure we have H-1 data
+        // We extend backwards significantly to capture the last available snapshot
+        $extendedDateFrom = $dateRange['date_from_carbon']->copy()->subDays(365)->startOfDay();
         
         $onhandRecords = StockByWhSnapshot::query()
             ->whereIn('warehouse', $warehousesToQuery)
@@ -289,6 +290,21 @@ class DailyStockController extends Controller
             ->keyBy(function($item) {
                 return $item->warehouse . '|' . trim($item->period_key);
             });
+
+        // Query 1b: Get last available snapshot for each warehouse as fallback
+        // This is used when no snapshot exists in the requested date range
+        $lastSnapshotByWarehouse = collect();
+        foreach ($warehousesToQuery as $wh) {
+            $lastSnapshot = StockByWhSnapshot::where('warehouse', $wh)
+                ->where('snapshot_date', '<', $dateRange['date_from_carbon'])
+                ->orderBy('snapshot_date', 'desc')
+                ->selectRaw("SUM(onhand) as onhand_total")
+                ->first();
+            
+            if ($lastSnapshot && $lastSnapshot->onhand_total > 0) {
+                $lastSnapshotByWarehouse[$wh] = (int) $lastSnapshot->onhand_total;
+            }
+        }
 
         // Get date format for InventoryTransaction (using trans_date2)
         $transDateFormat = $this->getTransDateFormatByPeriod($period);
@@ -410,7 +426,7 @@ class DailyStockController extends Controller
         $allPeriods = $this->generateAllPeriods($period, $dateRange['date_from'], $dateRange['date_to']);
 
         // Group by warehouse and fill missing periods
-        $warehouses = collect($warehousesToQuery)->map(function ($warehouseCode) use ($records, $allPeriods, $period, $granularity) {
+        $warehouses = collect($warehousesToQuery)->map(function ($warehouseCode) use ($records, $allPeriods, $period, $granularity, $lastSnapshotByWarehouse) {
             $warehouseData = $records->where('warehouse', $warehouseCode);
 
             // Normalize period_key format and create a keyed collection
@@ -494,6 +510,43 @@ class DailyStockController extends Controller
                     $issue = $existing->issue_total ?? $existing->getAttribute('issue_total') ?? 0;
                     $adjustment = $existing->adjustment_total ?? $existing->getAttribute('adjustment_total') ?? 0;
 
+                    // Check if this period is today or in the future
+                    $periodDate = match($period) {
+                        'daily' => Carbon::parse($periodValue),
+                        'monthly' => Carbon::createFromFormat('Y-m', $periodValue)->startOfMonth(),
+                        'yearly' => Carbon::createFromFormat('Y', $periodValue)->startOfYear(),
+                        default => Carbon::parse($periodValue),
+                    };
+                    $now = Carbon::now();
+                    $isTodayOrFuture = $periodDate->greaterThanOrEqualTo($now->copy()->startOfDay());
+
+                    // If onhand is 0 and it's today or future, it means there's no snapshot data
+                    // In this case, use previous period's onhand data (H-1 logic)
+                    if ($onhand == 0 && $isTodayOrFuture && $index > 0) {
+                        // Get previous period value
+                        $previousPeriodValue = $allPeriods[$index - 1];
+                        $previousData = $dataByPeriod->get($previousPeriodValue);
+
+                        if ($previousData) {
+                            // Use previous period's onhand data only
+                            $onhand = $previousData->onhand_total ?? $previousData->getAttribute('onhand_total') ?? 0;
+                        } else {
+                            // If previous period also doesn't have data, look for the most recent available onhand data
+                            for ($i = $index - 1; $i >= 0; $i--) {
+                                $lookbackPeriodValue = $allPeriods[$i];
+                                $lookbackData = $dataByPeriod->get($lookbackPeriodValue);
+                                
+                                if ($lookbackData) {
+                                    $lookbackOnhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
+                                    if ($lookbackOnhand > 0) {
+                                        $onhand = $lookbackOnhand;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     return [
                         'period' => $periodValue,
                         'period_start' => $periodStart ? $periodStart->toDateTimeString() : null,
@@ -544,6 +597,11 @@ class DailyStockController extends Controller
                                     $onhand = $lookbackData->onhand_total ?? $lookbackData->getAttribute('onhand_total') ?? 0;
                                     break;
                                 }
+                            }
+                            
+                            // If still no data found, use last available snapshot as fallback
+                            if ($onhand == 0 && isset($lastSnapshotByWarehouse[$warehouseCode])) {
+                                $onhand = $lastSnapshotByWarehouse[$warehouseCode];
                             }
                         }
                     }
