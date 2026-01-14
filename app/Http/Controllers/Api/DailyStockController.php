@@ -414,6 +414,7 @@ class DailyStockController extends Controller
                 },
                 'granularity' => $period,
                 'onhand_total' => $onhandData ? (int)$onhandData->onhand_total : 0,
+                'has_snapshot' => $onhandData ? true : false, // Flag to indicate if onhand comes from actual snapshot
                 'receipt_total' => $receiptData ? (int)$receiptData->receipt_total : 0,
                 'issue_total' => $issueData ? (int)$issueData->issue_total : 0,
                 'adjustment_total' => $adjustmentData ? (int)$adjustmentData->adjustment_total : 0,
@@ -509,6 +510,7 @@ class DailyStockController extends Controller
                     $receipt = $existing->receipt_total ?? $existing->getAttribute('receipt_total') ?? 0;
                     $issue = $existing->issue_total ?? $existing->getAttribute('issue_total') ?? 0;
                     $adjustment = $existing->adjustment_total ?? $existing->getAttribute('adjustment_total') ?? 0;
+                    $hasSnapshot = $existing->has_snapshot ?? $existing->getAttribute('has_snapshot') ?? false;
 
                     // Check if this period is today or in the future
                     $periodDate = match($period) {
@@ -520,9 +522,10 @@ class DailyStockController extends Controller
                     $now = Carbon::now();
                     $isTodayOrFuture = $periodDate->greaterThanOrEqualTo($now->copy()->startOfDay());
 
-                    // If onhand is 0 and it's today or future, it means there's no snapshot data
+                    // If onhand is 0 and it's today or future AND there's no actual snapshot data
                     // In this case, use previous period's onhand data (H-1 logic)
-                    if ($onhand == 0 && $isTodayOrFuture && $index > 0) {
+                    // Only do this if has_snapshot is false (meaning onhand=0 is due to missing data, not actual data)
+                    if ($onhand == 0 && !$hasSnapshot && $isTodayOrFuture && $index > 0) {
                         // Get previous period value
                         $previousPeriodValue = $allPeriods[$index - 1];
                         $previousData = $dataByPeriod->get($previousPeriodValue);
