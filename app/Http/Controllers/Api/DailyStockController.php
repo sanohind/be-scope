@@ -270,10 +270,13 @@ class DailyStockController extends Controller
         $snapshotDateFormat = $this->getSnapshotDateFormatByPeriod($period);
 
         // Query 1: Get onhand from StockByWhSnapshot
+        // Extended date range to include previous days (up to 30 days back) to ensure we have H-1 data
+        $extendedDateFrom = $dateRange['date_from_carbon']->copy()->subDays(30)->startOfDay();
+        
         $onhandRecords = StockByWhSnapshot::query()
             ->whereIn('warehouse', $warehousesToQuery)
             ->whereBetween('snapshot_date', [
-                $dateRange['date_from_carbon']->startOfDay(),
+                $extendedDateFrom,
                 $dateRange['date_to_carbon']->endOfDay()
             ])
             ->selectRaw("
