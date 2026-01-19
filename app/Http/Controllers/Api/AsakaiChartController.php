@@ -104,7 +104,13 @@ class AsakaiChartController extends ApiController
             // If asakai_title_id is provided and we have date range, fill missing dates
             if ($asakaiTitleId && $dateFrom && $dateTo) {
                 // Generate all periods in range
-                $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+                $carbonDateFrom = Carbon::parse($dateFrom);
+                $carbonDateTo = Carbon::parse($dateTo);
+                
+                $dateRange = $this->generateDateRange($carbonDateFrom, $carbonDateTo, $period);
+                $allPeriods = array_map(function($date) {
+                    return $date->format('Y-m-d');
+                }, $dateRange);
 
                 // Fill missing dates with qty = 0
                 $filledData = collect($allPeriods)->map(function ($periodValue) use ($chartsByDate, $asakaiTitleId) {

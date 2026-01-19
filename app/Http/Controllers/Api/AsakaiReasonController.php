@@ -133,14 +133,14 @@ class AsakaiReasonController extends ApiController
             $validator = Validator::make($request->all(), [
                 'asakai_chart_id' => 'required|exists:asakai_charts,id',
                 'date' => 'required|date',
-                'part_no' => 'required|string',
-                'part_name' => 'required|string',
-                'problem' => 'required|string',
-                'qty' => 'required|integer',
-                'section' => 'required|in:brazzing,chassis,nylon,subcon,passthrough',
-                'line' => 'required|string',
-                'penyebab' => 'required|string',
-                'perbaikan' => 'required|string',
+                'part_no' => 'nullable|string',
+                'part_name' => 'nullable|string',
+                'problem' => 'nullable|string',
+                'qty' => 'nullable|integer',
+                'section' => 'nullable|in:brazzing,chassis,nylon,subcon,passthrough,no_section',
+                'line' => 'nullable|string',
+                'penyebab' => 'nullable|string',
+                'perbaikan' => 'nullable|string',
             ]);
 
             if ($validator->fails()) {
@@ -294,14 +294,14 @@ class AsakaiReasonController extends ApiController
             $validator = Validator::make($request->all(), [
                 'asakai_chart_id' => 'sometimes|required|exists:asakai_charts,id',
                 'date' => 'sometimes|required|date',
-                'part_no' => 'sometimes|required|string',
-                'part_name' => 'sometimes|required|string',
-                'problem' => 'sometimes|required|string',
-                'qty' => 'sometimes|required|integer',
-                'section' => 'sometimes|required|in:brazzing,chassis,nylon,subcon,passthrough',
-                'line' => 'sometimes|required|string',
-                'penyebab' => 'sometimes|required|string',
-                'perbaikan' => 'sometimes|required|string',
+                'part_no' => 'nullable|string',
+                'part_name' => 'nullable|string',
+                'problem' => 'nullable|string',
+                'qty' => 'nullable|integer',
+                'section' => 'nullable|in:brazzing,chassis,nylon,subcon,passthrough,no_section',
+                'line' => 'nullable|string',
+                'penyebab' => 'nullable|string',
+                'perbaikan' => 'nullable|string',
             ]);
 
             if ($validator->fails()) {
