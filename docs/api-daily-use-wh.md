@@ -244,4 +244,108 @@ API untuk mengelola data Daily Use Warehouse dengan format berbasis periode (bul
 Jika Anda perlu mendapatkan qty untuk tanggal spesifik:
 - Query berdasarkan `year` dan `period`
 - Qty yang didapat berlaku untuk **semua tanggal** di bulan tersebut
-- Contoh: Data dengan `year=2026, period=1, qty=100` berarti setiap tanggal di Januari 2026 memiliki qty=100
+
+---
+
+## Min/Max Stock API (New)
+
+Fitur baru untuk mengelola Minimum dan Maximum Stock Level per Warehouse per Bulan.
+
+### Database Structure: `daily_use_wh_min_max`
+
+| Column      | Type    | Description                                             |
+|-------------|---------|---------------------------------------------------------|
+| id          | integer | Primary key                                             |
+| warehouse   | string  | Warehouse code                                          |
+| year        | integer | Tahun (2000-2100)                                       |
+| period      | integer | Periode/bulan (1-12)                                    |
+| min_onhand  | integer | Minimum stock level                                     |
+| max_onhand  | integer | Maximum stock level                                     |
+
+**Constraint**:
+- Unique combination of `warehouse` + `year` + `period`
+- `min_onhand` tidak boleh lebih besar dari `max_onhand`
+
+### API Endpoints
+
+### 8. Input/Update Min-Max Stock
+Menginput atau mengupdate data limit stock. Jika data sudah ada untuk kombinasi warehouse+year+period, akan diupdate. Jika belum, akan dibuat baru.
+
+**POST** `/api/daily-use-wh/min-max`
+
+**Request Body:**
+```json
+{
+  "warehouse": "WH01",
+  "year": 2026,
+  "period": 1,
+  "min_onhand": 100,
+  "max_onhand": 500
+}
+```
+
+**Validasi:**
+- `warehouse`: required, string, max 50 chars
+- `year`: required, integer, 2000-2100
+- `period`: required, integer, 1-12
+- `min_onhand`: required, integer, min 0
+- `max_onhand`: required, integer, min 0
+- Logika: `min_onhand` <= `max_onhand`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Data Min/Max berhasil disimpan",
+  "data": {
+    "warehouse": "WH01",
+    "year": 2026,
+    "period": 1,
+    "min_onhand": 100,
+    "max_onhand": 500,
+    "updated_at": "...",
+    "created_at": "...",
+    "id": 1
+  }
+}
+```
+
+### 9. Get Min-Max Data
+Mengambil daftar limit stock dengan filter.
+
+**GET** `/api/daily-use-wh/min-max`
+
+**Query Parameters:**
+- `warehouse` (optional): Filter by warehouse code
+- `year` (optional): Filter by year
+- `period` (optional): Filter by period/month
+- `per_page` (optional): Items per page (default: 50, max: 100)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Data Min/Max berhasil diambil",
+  "data": {
+    "current_page": 1,
+    "data": [
+      {
+        "id": 1,
+        "warehouse": "WH01",
+        "year": 2026,
+        "period": 1,
+        "min_onhand": 100,
+        "max_onhand": 500,
+        "created_at": "...",
+        "updated_at": "..."
+      }
+    ],
+    "first_page_url": "...",
+    "from": 1,
+    "last_page": 1,
+    "per_page": 50,
+    "to": 1,
+    "total": 1
+  }
+}
+```
