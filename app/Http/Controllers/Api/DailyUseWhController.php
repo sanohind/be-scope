@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\DailyUseWh;
+use App\Models\DailyUseWhMinMax;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -468,6 +469,79 @@ class DailyUseWhController extends ApiController
             return $this->sendError('Validasi gagal', $e->errors(), 422);
         } catch (\Throwable $e) {
             return $this->sendError('Gagal menghapus data: ' . $e->getMessage(), [], 500);
+        }
+    }
+
+    /**
+     * Get DailyUseWhMinMax data
+     */
+    public function getMinMax(Request $request): JsonResponse
+    {
+        $query = DailyUseWhMinMax::query();
+
+        if ($request->has('warehouse')) {
+            $query->where('warehouse', $request->input('warehouse'));
+        }
+
+        if ($request->has('year')) {
+            $query->where('year', (int) $request->input('year'));
+        }
+
+        if ($request->has('period')) {
+            $query->where('period', (int) $request->input('period'));
+        }
+        
+        $perPage = min(100, max(10, (int) $request->input('per_page', 50)));
+        $data = $query->orderBy('year', 'desc')
+            ->orderBy('period', 'desc')
+            ->orderBy('warehouse')
+            ->paginate($perPage);
+
+        return $this->sendResponse($data, 'Data Min/Max berhasil diambil');
+    }
+
+    /**
+     * Store or update DailyUseWhMinMax data
+     */
+    public function storeMinMax(Request $request): JsonResponse
+    {
+         try {
+            $request->validate([
+                'warehouse' => 'required|string|max:50',
+                'year' => 'required|integer|min:2000|max:2100',
+                'period' => 'required|integer|min:1|max:12',
+                'min_onhand' => 'required|integer|min:0',
+                'max_onhand' => 'required|integer|min:0',
+            ]);
+
+            $warehouse = trim($request->input('warehouse'));
+            $year = (int) $request->input('year');
+            $period = (int) $request->input('period');
+            $minOnhand = (int) $request->input('min_onhand');
+            $maxOnhand = (int) $request->input('max_onhand');
+
+            if ($minOnhand > $maxOnhand) {
+                return $this->sendError('Validasi gagal', ['min_onhand' => ['Min onhand tidak boleh lebih besar dari Max onhand']], 422);
+            }
+
+            $record = DailyUseWhMinMax::updateOrCreate(
+                [
+                    'warehouse' => $warehouse,
+                    'year' => $year,
+                    'period' => $period,
+                ],
+                [
+                    'min_onhand' => $minOnhand,
+                    'max_onhand' => $maxOnhand,
+                ]
+            );
+
+            return $this->sendResponse($record, 'Data Min/Max berhasil disimpan');
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return $this->sendError('Validasi gagal', $e->errors(), 422);
+        } catch (\Throwable $e) {
+            return $this->sendError('Gagal menyimpan data Min/Max: ' . $e->getMessage(), [], 500);
         }
     }
 }

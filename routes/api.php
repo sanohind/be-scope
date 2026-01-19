@@ -27,6 +27,9 @@ use App\Http\Controllers\Api\SalesAnalyticsController;
 use App\Http\Controllers\Api\DailyUseWhController;
 use App\Http\Controllers\Api\ProductionPlanController;
 use App\Http\Controllers\Api\FileDownloadController;
+use App\Http\Controllers\Api\AsakaiTitleController;
+use App\Http\Controllers\Api\AsakaiChartController;
+use App\Http\Controllers\Api\AsakaiReasonController;
 
 /*
 |--------------------------------------------------------------------------
@@ -47,6 +50,8 @@ Route::get('/stock/daily', [DailyStockController::class, 'index']);
 
 // Daily Use WH API Routes
 Route::prefix('daily-use-wh')->group(function () {
+    Route::post('/min-max', [DailyUseWhController::class, 'storeMinMax']);
+    Route::get('/min-max', [DailyUseWhController::class, 'getMinMax']);
     Route::post('/import', [DailyUseWhController::class, 'import']);
     Route::post('/store', [DailyUseWhController::class, 'store']);
     Route::get('/', [DailyUseWhController::class, 'index']);
@@ -286,3 +291,28 @@ Route::prefix('files')->group(function () {
     Route::get('/list/{folder}', [FileDownloadController::class, 'listFiles']);
     Route::get('/download/{folder}/{filename}', [FileDownloadController::class, 'downloadFile']);
 });
+
+// Asakai Board API Routes
+Route::prefix('asakai')->group(function () {
+    // Asakai Titles (Master Data)
+    Route::get('/titles', [AsakaiTitleController::class, 'index']);
+    Route::get('/titles/{id}', [AsakaiTitleController::class, 'show']);
+    
+    // Asakai Charts
+    Route::get('/charts', [AsakaiChartController::class, 'index']);
+    Route::post('/charts', [AsakaiChartController::class, 'store']);
+    Route::get('/charts/data', [AsakaiChartController::class, 'getChartData']); // Get chart data with filled dates
+    Route::get('/charts/available-dates', [AsakaiChartController::class, 'getAvailableDates']);
+    Route::get('/charts/{id}', [AsakaiChartController::class, 'show']);
+    Route::put('/charts/{id}', [AsakaiChartController::class, 'update']);
+    Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy']);
+    
+    // Asakai Reasons
+    Route::get('/reasons', [AsakaiReasonController::class, 'index']);
+    Route::post('/reasons', [AsakaiReasonController::class, 'store']);
+    Route::get('/reasons/{id}', [AsakaiReasonController::class, 'show']);
+    Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update']);
+    Route::delete('/reasons/{id}', [AsakaiReasonController::class, 'destroy']);
+    Route::get('/charts/{chartId}/reasons', [AsakaiReasonController::class, 'getByChart']);
+});
+
