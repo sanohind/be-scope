@@ -417,17 +417,8 @@ class AsakaiChartController extends ApiController
         try {
             $chart = AsakaiChart::findOrFail($id);
             
-            // Check if chart has associated reasons
-            $hasReasons = $chart->reasons()->exists();
-            if ($hasReasons) {
-                $reasonCount = $chart->reasons()->count();
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Cannot delete chart with associated reasons',
-                    'error' => "This chart has {$reasonCount} associated reason(s). Please delete the reasons first or use force delete.",
-                    'reason_count' => $reasonCount
-                ], 422);
-            }
+            // Delete associated reasons first
+            $chart->reasons()->delete();
             
             $chart->delete();
 
