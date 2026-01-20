@@ -158,7 +158,10 @@ class ProductionPlanController extends ApiController
 
             DB::transaction(function () use ($inserts, $updates, &$inserted, &$updated) {
                 if (!empty($inserts)) {
-                    ProductionPlan::insert($inserts);
+                    $chunks = array_chunk($inserts, 1000);
+                    foreach ($chunks as $chunk) {
+                        ProductionPlan::insert($chunk);
+                    }
                     $inserted = count($inserts);
                 }
                 
@@ -256,7 +259,10 @@ class ProductionPlanController extends ApiController
 
             DB::transaction(function () use ($inserts, $updates, &$inserted, &$updated) {
                 if (!empty($inserts)) {
-                    ProductionPlan::insert($inserts);
+                    $chunks = array_chunk($inserts, 1000);
+                    foreach ($chunks as $chunk) {
+                        ProductionPlan::insert($chunk);
+                    }
                     $inserted = count($inserts);
                 }
                 
