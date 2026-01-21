@@ -7,6 +7,7 @@ use App\Models\StockByWhSnapshot;
 use App\Models\WarehouseStockSummary;
 use App\Models\InventoryTransaction;
 use App\Models\DailyUseWh;
+use App\Models\WhDeliveryPlan;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -335,6 +336,38 @@ class Dashboard1RevisionController extends ApiController
     }
 
     /**
+     * Get WhDeliveryPlan data for a date range
+     * Returns collection with partno => average daily delivery qty mapping
+     */
+    private function getDeliveryPlanDataForDateRange(string $warehouse, $dateFrom, $dateTo): array
+    {
+        $dateFrom = is_string($dateFrom) ? $dateFrom : $dateFrom->format('Y-m-d');
+        $dateTo = is_string($dateTo) ? $dateTo : $dateTo->format('Y-m-d');
+
+        // Sum qty_delivery by partno in the date range
+        $plans = WhDeliveryPlan::where('warehouse', $warehouse)
+            ->whereBetween('delivery_date', [$dateFrom, $dateTo])
+            ->selectRaw('partno, SUM(qty_delivery) as total_qty')
+            ->groupBy('partno')
+            ->get();
+
+        // Calculate days in range (inclusive)
+        $days = Carbon::parse($dateFrom)->diffInDays(Carbon::parse($dateTo)) + 1;
+        $days = max(1, $days);
+
+        $map = [];
+        foreach ($plans as $p) {
+            $partno = trim((string) $p->partno);
+            if ($partno !== '') {
+                // Average daily delivery = total / days
+                $map[$partno] = $p->total_qty / $days;
+            }
+        }
+        
+        return $map;
+    }
+
+    /**
      * CHART 1: Comprehensive KPI Cards
      * 6 metrics combining stock + transaction data
      * DATE FILTER: Applied to transaction metrics only
@@ -527,8 +560,11 @@ class Dashboard1RevisionController extends ApiController
         $dateRange = $this->getDateRange($request, 30, $period);
 
         // Check if warehouse uses estimatedConsumption logic
+        // Check if warehouse uses estimatedConsumption logic
         $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
-        $useEstimatedConsumption = in_array($warehouse, $rmWarehouses);
+        $fgWarehouses = ['WHFG01', 'WHFG02'];
+        // Use estimated consumption logic for both RM and FG warehouses
+        $useEstimatedConsumption = in_array($warehouse, $rmWarehouses) || in_array($warehouse, $fgWarehouses);
 
         // Detect database driver for proper date formatting
         $driver = $this->getDatabaseDriver();
@@ -577,7 +613,7 @@ class Dashboard1RevisionController extends ApiController
         $dateFilter = $this->buildDateFilter('t', $dateRange);
 
         if ($useEstimatedConsumption) {
-            // For RM warehouses: Use estimatedConsumption logic
+            // For RM/FG warehouses: Use estimatedConsumption logic
             // Get plan_date parameters
             $planDate = $request->input('plan_date');
             $planDateFrom = $request->input('date_from');
@@ -611,20 +647,39 @@ class Dashboard1RevisionController extends ApiController
                 $planDateRange = [$from, $to];
             }
 
-            // Get DailyUseWh data using new year/period structure
+            // Get DailyUseWh or WhDeliveryPlan data
             $partnoDailyUseMap = [];
-            if ($useExactPlanDate) {
-                $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
-                    $warehouse,
-                    $planDateParsed->startOfMonth(),
-                    $planDateParsed->endOfMonth()
-                );
-            } elseif ($planDateRange) {
-                $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
-                    $warehouse,
-                    $planDateRange[0],
-                    $planDateRange[1]
-                );
+            
+            if (in_array($warehouse, $rmWarehouses)) {
+                // RM Logic: Use DailyUseWh
+                if ($useExactPlanDate) {
+                    $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                        $warehouse,
+                        $planDateParsed->startOfMonth(),
+                        $planDateParsed->endOfMonth()
+                    );
+                } elseif ($planDateRange) {
+                    $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
+                        $warehouse,
+                        $planDateRange[0],
+                        $planDateRange[1]
+                    );
+                }
+            } elseif (in_array($warehouse, $fgWarehouses)) {
+                // FG Logic: Use WhDeliveryPlan
+                if ($useExactPlanDate) {
+                    $partnoDailyUseMap = $this->getDeliveryPlanDataForDateRange(
+                        $warehouse,
+                        $planDateParsed->startOfMonth(),
+                        $planDateParsed->endOfMonth()
+                    );
+                } elseif ($planDateRange) {
+                    $partnoDailyUseMap = $this->getDeliveryPlanDataForDateRange(
+                        $warehouse,
+                        $planDateRange[0],
+                        $planDateRange[1]
+                    );
+                }
             }
 
             // Get stock data with partno and onhand

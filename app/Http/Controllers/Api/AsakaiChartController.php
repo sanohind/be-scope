@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Api\ApiController;
 use App\Models\AsakaiChart;
 use App\Models\AsakaiTitle;
+use App\Models\AsakaiTarget;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
@@ -666,6 +667,118 @@ class AsakaiChartController extends ApiController
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to fetch available dates',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get AsakaiTarget data
+     */
+    public function getTarget(Request $request)
+    {
+        $query = AsakaiTarget::query();
+
+        if ($request->has('asakai_title_id')) {
+            $query->where('asakai_title_id', $request->input('asakai_title_id'));
+        }
+
+        if ($request->has('year')) {
+            $query->where('year', (int) $request->input('year'));
+        }
+
+        if ($request->has('period')) {
+            $query->where('period', (int) $request->input('period'));
+        }
+        
+        $perPage = min(100, max(10, (int) $request->input('per_page', 50)));
+        $data = $query->orderBy('year', 'desc')
+            ->orderBy('period', 'desc')
+            ->orderBy('asakai_title_id')
+            ->paginate($perPage);
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
+            'message' => 'Data Target berhasil diambil'
+        ], 200);
+    }
+
+    /**
+     * Store or update AsakaiTarget data
+     */
+    public function storeTarget(Request $request)
+    {
+         try {
+            $validator = Validator::make($request->all(), [
+                'asakai_title_id' => 'required|exists:asakai_titles,id',
+                'year' => 'required|integer|min:2000|max:2100',
+                'period' => 'required|integer|min:1|max:12',
+                'target' => 'required|integer|min:0',
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Validation error',
+                    'errors' => $validator->errors()
+                ], 422);
+            }
+
+            $asakaiTitleId = $request->input('asakai_title_id');
+            $year = (int) $request->input('year');
+            $period = (int) $request->input('period');
+            $target = (int) $request->input('target');
+
+            $record = AsakaiTarget::updateOrCreate(
+                [
+                    'asakai_title_id' => $asakaiTitleId,
+                    'year' => $year,
+                    'period' => $period,
+                ],
+                [
+                    'target' => $target,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'data' => $record,
+                'message' => 'Data Target berhasil disimpan'
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menyimpan data Target',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Delete AsakaiTarget record by ID
+     */
+    public function destroyTarget($id)
+    {
+        try {
+            $data = AsakaiTarget::findOrFail($id);
+            $data->delete();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Data Target berhasil dihapus'
+            ], 200);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Data tidak ditemukan',
+                'error' => 'Data Target tidak ditemukan'
+            ], 404);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menghapus data',
                 'error' => $e->getMessage()
             ], 500);
         }

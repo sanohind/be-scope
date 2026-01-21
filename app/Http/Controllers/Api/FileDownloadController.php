@@ -11,6 +11,7 @@ class FileDownloadController extends ApiController
 {
     private const ALLOWED_FOLDERS = [
         'prod_plan' => 'prod_plan',
+        'delivery_plan' => 'prod_plan',
     ];
 
     /**

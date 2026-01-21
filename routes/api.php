@@ -30,6 +30,7 @@ use App\Http\Controllers\Api\FileDownloadController;
 use App\Http\Controllers\Api\AsakaiTitleController;
 use App\Http\Controllers\Api\AsakaiChartController;
 use App\Http\Controllers\Api\AsakaiReasonController;
+use App\Http\Controllers\Api\WhDeliveryPlanController;
 
 /*
 |--------------------------------------------------------------------------
@@ -73,6 +74,17 @@ Route::prefix('production-plan')->group(function () {
     Route::post('/delete-multiple', [ProductionPlanController::class, 'destroyMultiple']);
 });
 
+// Wh Delivery Plan API Routes
+Route::prefix('wh-delivery-plan')->group(function () {
+    Route::post('/import', [WhDeliveryPlanController::class, 'import']);
+    Route::post('/store', [WhDeliveryPlanController::class, 'store']);
+    Route::get('/', [WhDeliveryPlanController::class, 'index']);
+    Route::get('/{id}', [WhDeliveryPlanController::class, 'show']);
+    Route::put('/{id}', [WhDeliveryPlanController::class, 'update']);
+    Route::delete('/{id}', [WhDeliveryPlanController::class, 'destroy']);
+    Route::post('/delete-multiple', [WhDeliveryPlanController::class, 'destroyMultiple']);
+});
+
 // Public API Routes (add auth middleware if needed)
 Route::apiResources([
     'stocks' => StockByWhController::class,
@@ -89,16 +101,12 @@ Route::apiResources([
 Route::prefix('sync')->group(function () {
     // Start manual sync
     Route::post('/start', [SyncController::class, 'startManualSync']);
-
     // Get sync status
     Route::get('/status', [SyncController::class, 'getSyncStatus']);
-
     // Get sync logs with pagination
     Route::get('/logs', [SyncController::class, 'getSyncLogs']);
-
     // Get sync statistics
     Route::get('/statistics', [SyncController::class, 'getSyncStatistics']);
-
     // Cancel running sync
     Route::post('/cancel', [SyncController::class, 'cancelSync']);
 });
@@ -304,6 +312,11 @@ Route::prefix('asakai')->group(function () {
     Route::post('/charts', [AsakaiChartController::class, 'store']);
     Route::get('/charts/data', [AsakaiChartController::class, 'getChartData']); // Get chart data with filled dates
     Route::get('/charts/available-dates', [AsakaiChartController::class, 'getAvailableDates']);
+    
+    // Target Routes
+    Route::get('/charts/target', [AsakaiChartController::class, 'getTarget']);
+    Route::post('/charts/target', [AsakaiChartController::class, 'storeTarget']);
+    Route::delete('/charts/target/{id}', [AsakaiChartController::class, 'destroyTarget']);
     Route::get('/charts/{id}', [AsakaiChartController::class, 'show']);
     Route::put('/charts/{id}', [AsakaiChartController::class, 'update']);
     Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy']);
