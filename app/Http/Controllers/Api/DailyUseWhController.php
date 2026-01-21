@@ -544,4 +544,21 @@ class DailyUseWhController extends ApiController
             return $this->sendError('Gagal menyimpan data Min/Max: ' . $e->getMessage(), [], 500);
         }
     }
+
+    /**
+     * Delete DailyUseWhMinMax record by ID
+     */
+    public function destroyMinMax($id): JsonResponse
+    {
+        try {
+            $data = DailyUseWhMinMax::findOrFail($id);
+            $data->delete();
+
+            return $this->sendResponse([], 'Data Min/Max berhasil dihapus');
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return $this->sendError('Data tidak ditemukan', [], 404);
+        } catch (\Throwable $e) {
+            return $this->sendError('Gagal menghapus data: ' . $e->getMessage(), [], 500);
+        }
+    }
 }

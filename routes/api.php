@@ -52,6 +52,7 @@ Route::get('/stock/daily', [DailyStockController::class, 'index']);
 Route::prefix('daily-use-wh')->group(function () {
     Route::post('/min-max', [DailyUseWhController::class, 'storeMinMax']);
     Route::get('/min-max', [DailyUseWhController::class, 'getMinMax']);
+    Route::delete('/min-max/{id}', [DailyUseWhController::class, 'destroyMinMax']);
     Route::post('/import', [DailyUseWhController::class, 'import']);
     Route::post('/store', [DailyUseWhController::class, 'store']);
     Route::get('/', [DailyUseWhController::class, 'index']);
