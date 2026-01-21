@@ -486,23 +486,45 @@ class AsakaiChartController extends ApiController
             $charts = AsakaiChart::with(['reasons.user'])
                 ->where('asakai_title_id', $request->asakai_title_id)
                 ->whereBetween('date', [$dateFrom->format('Y-m-d'), $dateTo->format('Y-m-d')])
-                ->get()
-                ->keyBy(function ($item) {
-                    return $item->date->format('Y-m-d');
-                });
+                ->get();
+
+            // Group data by period
+            $chartsByPeriod = $charts->groupBy(function ($item) use ($period) {
+                if ($period === 'monthly') {
+                    return $item->date->format('Y-m');
+                } elseif ($period === 'yearly') {
+                    return $item->date->format('Y');
+                }
+                return $item->date->format('Y-m-d');
+            });
 
             // Generate all dates in range
             $allDates = $this->generateDateRange($dateFrom, $dateTo, $period);
 
             // Fill missing dates with qty = 0
-            $data = collect($allDates)->map(function ($date) use ($charts, $request) {
+            $data = collect($allDates)->map(function ($date) use ($chartsByPeriod, $request, $period) {
                 $dateKey = $date->format('Y-m-d');
                 
-                if ($charts->has($dateKey)) {
-                    $chart = $charts->get($dateKey);
+                // Determine lookup key based on period
+                if ($period === 'monthly') {
+                    $lookupKey = $date->format('Y-m');
+                } elseif ($period === 'yearly') {
+                    $lookupKey = $date->format('Y');
+                } else {
+                    $lookupKey = $date->format('Y-m-d');
+                }
+                
+                if ($chartsByPeriod->has($lookupKey)) {
+                    $group = $chartsByPeriod->get($lookupKey);
+                    $chart = $group->first(); // Use first chart for metadata like ID
                     
-                    // Transform reasons data
-                    $reasons = $chart->reasons->map(function ($reason) {
+                    // Aggregate qty
+                    $qty = $group->sum('qty');
+                    
+                    // Aggregate reasons
+                    $reasons = $group->flatMap(function ($item) {
+                        return $item->reasons;
+                    })->map(function ($reason) {
                         return [
                             'id' => $reason->id,
                             'date' => $reason->date->format('Y-m-d'),
@@ -518,11 +540,11 @@ class AsakaiChartController extends ApiController
                             'user_id' => $reason->user_id,
                             'created_at' => $reason->created_at->format('Y-m-d H:i:s'),
                         ];
-                    });
+                    })->values();
                     
                     return [
                         'date' => $dateKey,
-                        'qty' => $chart->qty,
+                        'qty' => $qty,
                         'has_data' => true,
                         'chart_id' => $chart->id,
                         'reasons' => $reasons,
