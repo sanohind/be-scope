@@ -31,10 +31,26 @@ class AsakaiTitleSeeder extends Seeder
             ['title' => 'Delivery - Line Stop', 'category' => 'Delivery'],
             ['title' => 'Delivery - On Time Delivery', 'category' => 'Delivery'],
             ['title' => 'Delivery - Criple', 'category' => 'Delivery'],
+            
+            // Maintenance Category
+            ['title' => 'Maintenance - Down Time', 'category' => 'Maintenance'],
+            ['title' => 'Maintenance - Mean Time to Repair', 'category' => 'Maintenance'],
+
+            // Productivity Category
+            ['title' => 'Productivity - Efficiency Nylon', 'category' => 'Productivity'],
+            ['title' => 'Productivity - Efficiency Brazing', 'category' => 'Productivity'],
+            ['title' => 'Productivity - Efficiency Chassis', 'category' => 'Productivity'],
+
+            ['title' => 'Productivity - Pcs/WH Nylon', 'category' => 'Productivity'],
+            ['title' => 'Productivity - Pcs/WH Brazing', 'category' => 'Productivity'],
+            ['title' => 'Productivity - Pcs/WH Chassis', 'category' => 'Productivity'],
         ];
 
         foreach ($titles as $title) {
-            AsakaiTitle::create($title);
+            AsakaiTitle::firstOrCreate(
+                ['title' => $title['title']],
+                ['category' => $title['category']]
+            );
         }
     }
 }

@@ -18,6 +18,7 @@ class AsakaiChart extends Model
 
     protected $casts = [
         'date' => 'date',
+        'qty' => 'float',
     ];
 
     /**

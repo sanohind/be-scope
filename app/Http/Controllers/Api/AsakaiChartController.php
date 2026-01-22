@@ -207,7 +207,7 @@ class AsakaiChartController extends ApiController
             $validator = Validator::make($request->all(), [
                 'asakai_title_id' => 'required|exists:asakai_titles,id',
                 'date' => 'required|date',
-                'qty' => 'required|integer',
+                'qty' => 'required|numeric|min:0',
             ]);
 
             if ($validator->fails()) {
