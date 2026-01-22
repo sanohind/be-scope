@@ -42,16 +42,17 @@ class AsakaiChartController extends ApiController
             $dateTo = $request->get('date_to');
 
             // Calculate date range based on period
+            // Calculate date range based on period
             if ($period === 'daily') {
-                // Daily: Filter by month from date_from
-                if ($dateFrom) {
+                // Daily: Filter by month from date_from if date_to is not provided
+                if ($dateFrom && !$dateTo) {
                     $dateFromCarbon = Carbon::parse($dateFrom);
                     $dateFrom = $dateFromCarbon->startOfMonth()->format('Y-m-d');
                     $dateTo = $dateFromCarbon->endOfMonth()->format('Y-m-d');
                 }
             } elseif ($period === 'monthly') {
-                // Monthly: Filter by year from date_from
-                if ($dateFrom) {
+                // Monthly: Filter by year from date_from if date_to is not provided
+                if ($dateFrom && !$dateTo) {
                     $dateFromCarbon = Carbon::parse($dateFrom);
                     $dateFrom = $dateFromCarbon->startOfYear()->format('Y-m-d');
                     $dateTo = $dateFromCarbon->endOfYear()->format('Y-m-d');

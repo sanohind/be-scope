@@ -401,21 +401,14 @@ class Dashboard1RevisionController extends ApiController
 
         // Critical Items Calculation - different logic based on warehouse type
         $criticalItems = 0;
+        $criticalPartnosList = [];
         
         // Check warehouse type
         $fgWarehouses = ['WHFG01', 'WHFG02'];
         $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
         
-        if (in_array($warehouse, $fgWarehouses)) {
-            // For FG warehouses: Use onhand < min_stock logic
-            $criticalItems = (clone $stockQuery)
-                ->whereNotNull('partno')
-                ->whereRaw('onhand < min_stock')
-                ->distinct()
-                ->count('partno');
-                
-        } elseif (in_array($warehouse, $rmWarehouses)) {
-            // For RM warehouses: Use estimatedConsumption logic
+        // Use estimated consumption logic for both RM and FG warehouses
+        if (in_array($warehouse, $rmWarehouses) || in_array($warehouse, $fgWarehouses)) {
             // Get plan_date parameters
             $planDate = $request->input('plan_date');
             $planDateFrom = $request->input('date_from');
@@ -431,7 +424,7 @@ class Dashboard1RevisionController extends ApiController
                     $planDateRange = null;
 
                     if ($useExactPlanDate) {
-                        $planDateParsed = Carbon::parse($planDate);
+                        $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
                     } elseif ($usePlanDateRange) {
                         // Use date range when plan_date not provided
                         $from = $planDateFrom ? Carbon::parse($planDateFrom) : null;
@@ -446,25 +439,44 @@ class Dashboard1RevisionController extends ApiController
                         $planDateRange = [$from, $to];
                     }
 
-                    // Get DailyUseWh data using new year/period structure
-                    $partnoDailyUseMap = [];
-                    if ($useExactPlanDate) {
-                        // For exact date, get the month's data
-                        $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
-                            $warehouse,
-                            $planDateParsed->startOfMonth(),
-                            $planDateParsed->endOfMonth()
-                        );
-                    } elseif ($planDateRange) {
-                        // For date range
-                        $partnoDailyUseMap = $this->getDailyUseDataForDateRange(
-                            $warehouse,
-                            $planDateRange[0],
-                            $planDateRange[1]
-                        );
+                    // Get DailyUseWh or WhDeliveryPlan data
+                    $partnoConsumptionMap = [];
+
+                    if (in_array($warehouse, $rmWarehouses)) {
+                        // RM Logic: Use DailyUseWh
+                        if ($useExactPlanDate) {
+                            $planDateCarbon = Carbon::parse($planDateParsed);
+                            $partnoConsumptionMap = $this->getDailyUseDataForDateRange(
+                                $warehouse,
+                                $planDateCarbon->copy()->startOfMonth(),
+                                $planDateCarbon->copy()->endOfMonth()
+                            );
+                        } elseif ($planDateRange) {
+                            $partnoConsumptionMap = $this->getDailyUseDataForDateRange(
+                                $warehouse,
+                                $planDateRange[0],
+                                $planDateRange[1]
+                            );
+                        }
+                    } elseif (in_array($warehouse, $fgWarehouses)) {
+                        // FG Logic: Use WhDeliveryPlan
+                        if ($useExactPlanDate) {
+                            $planDateCarbon = Carbon::parse($planDateParsed);
+                            $partnoConsumptionMap = $this->getDeliveryPlanDataForDateRange(
+                                $warehouse,
+                                $planDateCarbon->copy()->startOfMonth(),
+                                $planDateCarbon->copy()->endOfMonth()
+                            );
+                        } elseif ($planDateRange) {
+                            $partnoConsumptionMap = $this->getDeliveryPlanDataForDateRange(
+                                $warehouse,
+                                $planDateRange[0],
+                                $planDateRange[1]
+                            );
+                        }
                     }
 
-                    if (!empty($partnoDailyUseMap)) {
+                    if (!empty($partnoConsumptionMap)) {
                         // Get stock items with their partno and onhand
                         $stockItems = (clone $stockQuery)
                             ->select('partno', 'onhand')
@@ -480,13 +492,13 @@ class Dashboard1RevisionController extends ApiController
                         }
 
                         // Calculate critical items based on estimatedConsumption
-                        foreach ($partnoDailyUseMap as $partno => $dailyUse) {
+                        foreach ($partnoConsumptionMap as $partno => $consumption) {
                             // Get onhand for this partno
                             $onhand = $partnoOnhandMap[$partno] ?? 0;
 
                             // Calculate estimatedConsumption
-                            if ($dailyUse > 0) {
-                                $estimatedConsumption = $onhand / $dailyUse;
+                            if ($consumption > 0) {
+                                $estimatedConsumption = $onhand / $consumption;
                             } else {
                                 $estimatedConsumption = 0;
                             }
@@ -494,6 +506,12 @@ class Dashboard1RevisionController extends ApiController
                             // Count as critical if estimatedConsumption <= 0
                             if ($estimatedConsumption <= 0) {
                                 $criticalItems++;
+                                $criticalPartnosList[] = [
+                                    'partno' => $partno,
+                                    'onhand' => $onhand,
+                                    'daily_use' => $consumption,
+                                    'estimated_consumption' => $estimatedConsumption
+                                ];
                             }
                         }
                     }
@@ -532,6 +550,7 @@ class Dashboard1RevisionController extends ApiController
             'total_sku' => $totalSku,
             'total_onhand' => round($totalOnhand, 2),
             'critical_items' => $criticalItems,
+            'critical_partnos' => $criticalPartnosList,
             'trans_in_period' => $transInPeriod,
             'net_movement' => round($netMovement ?? 0, 2),
             'snapshot_date' => $snapshotDate,
@@ -1841,7 +1860,9 @@ class Dashboard1RevisionController extends ApiController
             'transaction_types' => $this->transactionTypeDistribution($request)->getData(true),
             'fast_slow_moving' => $this->fastVsSlowMoving($request)->getData(true),
             'turnover_rate' => $this->stockTurnoverRate($request)->getData(true),
-            'stock_level_table' => $this->stockLevelTable($request)->getData(true)
+            'turnover_rate' => $this->stockTurnoverRate($request)->getData(true),
+            'stock_level_table' => $this->stockLevelTable($request)->getData(true),
+            'stock_level_by_customer' => $this->stockLevelByCustomer($request)->getData(true)
             // Note: Recent transactions excluded from bulk call due to pagination
         ]);
     }
@@ -2190,6 +2211,179 @@ class Dashboard1RevisionController extends ApiController
             ->limit($perPage)
             ->get();
 
+        // Stock Use Planning: Calculate estimatedConsumption and delivery_qty (daily_use for RM, qty_delivery for FG)
+        $planDate = $request->input('plan_date');
+        $planDateFrom = $request->input('date_from');
+        $planDateTo = $request->input('date_to');
+        $estimatedConsumptionMap = [];
+        $consumptionMap = [];
+
+        // Check if warehouse uses estimatedConsumption logic
+        // Check if warehouse uses estimatedConsumption logic
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
+        $fgWarehouses = ['WHFG01', 'WHFG02'];
+        // Use estimated consumption logic for both RM and FG warehouses
+        $useEstimatedConsumption = in_array($warehouse, $rmWarehouses) || in_array($warehouse, $fgWarehouses);
+
+        // Determine plan_date filtering (exact or range)
+        $useExactPlanDate = !empty($planDate);
+        $usePlanDateRange = !$useExactPlanDate && ($planDateFrom || $planDateTo);
+
+        if ($useEstimatedConsumption && ($useExactPlanDate || $usePlanDateRange)) {
+            try {
+                $planDateParsed = null;
+                $planDateRange = null;
+
+                if ($useExactPlanDate) {
+                    $planDateParsed = Carbon::parse($planDate)->format('Y-m-d');
+                } elseif ($usePlanDateRange) {
+                    // Use date range when plan_date not provided
+                    $from = $planDateFrom ? Carbon::parse($planDateFrom) : null;
+                    $to = $planDateTo ? Carbon::parse($planDateTo) : null;
+                    // Fall back to dateRange (already computed) if not provided
+                    if (!$from) {
+                        $from = Carbon::parse(substr($dateRange['date_from'], 0, 10));
+                    }
+                    if (!$to) {
+                        $to = Carbon::parse(substr($dateRange['date_to'], 0, 10));
+                    }
+                    $planDateRange = [$from, $to];
+                }
+
+                // Get DailyUseWh or WhDeliveryPlan data
+                $partnoConsumptionMap = [];
+                
+                if (in_array($warehouse, $rmWarehouses)) {
+                    // RM Logic: Use DailyUseWh
+                    if ($useExactPlanDate) {
+                        $planDateCarbon = Carbon::parse($planDateParsed);
+                        $partnoConsumptionMap = $this->getDailyUseDataForDateRange(
+                            $warehouse,
+                            $planDateCarbon->copy()->startOfMonth(),
+                            $planDateCarbon->copy()->endOfMonth()
+                        );
+                    } elseif ($planDateRange) {
+                        $partnoConsumptionMap = $this->getDailyUseDataForDateRange(
+                            $warehouse,
+                            $planDateRange[0],
+                            $planDateRange[1]
+                        );
+                    }
+                } elseif (in_array($warehouse, $fgWarehouses)) {
+                    // FG Logic: Use WhDeliveryPlan
+                    if ($useExactPlanDate) {
+                        $planDateCarbon = Carbon::parse($planDateParsed);
+                        $partnoConsumptionMap = $this->getDeliveryPlanDataForDateRange(
+                            $warehouse,
+                            $planDateCarbon->copy()->startOfMonth(),
+                            $planDateCarbon->copy()->endOfMonth()
+                        );
+                    } elseif ($planDateRange) {
+                        $partnoConsumptionMap = $this->getDeliveryPlanDataForDateRange(
+                            $warehouse,
+                            $planDateRange[0],
+                            $planDateRange[1]
+                        );
+                    }
+                }
+
+                if (!empty($partnoConsumptionMap)) {
+                    // Get all partno and their customer from StockByWh
+                    // Use the same base query to ensure consistency
+                    $stockQuery = $connection
+                        ? DB::connection($connection)->table($tableName . ' as s')
+                        : DB::table($tableName . ' as s');
+
+                    $stockQuery->where('s.warehouse', $warehouse)
+                        ->whereNotNull('s.customer');
+
+                    if ($snapshotDate) {
+                        $stockQuery->where('s.snapshot_date', $snapshotDate);
+                    }
+
+                    // Apply same filters as baseQuery
+                    if ($search) {
+                        $stockQuery->where(function ($q) use ($search) {
+                            $q->where('s.partno', 'LIKE', "%{$search}%")
+                                ->orWhere('s.partname', 'LIKE', "%{$search}%")
+                                ->orWhereRaw('s.[desc] LIKE ?', ["%{$search}%"])
+                                ->orWhere('s.customer', 'LIKE', "%{$search}%");
+                        });
+                    }
+
+                    if ($request->has('group_type_desc')) {
+                        $stockQuery->where('s.group_type_desc', $request->group_type_desc);
+                    }
+
+                    $stockItems = $stockQuery->select('s.partno', 's.customer')
+                        ->distinct()
+                        ->get();
+
+                    // Build mapping: partno (as string) -> array of customer
+                    $partnoCustomerMap = [];
+                    foreach ($stockItems as $item) {
+                        // Convert partno to string for consistent matching
+                        $partno = trim((string) $item->partno);
+                        if ($partno !== '') {
+                            if (!isset($partnoCustomerMap[$partno])) {
+                                $partnoCustomerMap[$partno] = [];
+                            }
+                            if (!in_array($item->customer, $partnoCustomerMap[$partno])) {
+                                $partnoCustomerMap[$partno][] = $item->customer;
+                            }
+                        }
+                    }
+
+                    // Calculate total consumption (daily_use/qty_delivery) per customer
+                    $customerConsumptionMap = [];
+                    foreach ($partnoConsumptionMap as $partno => $consumption) {
+                        // Default to 0 if consumption is null or invalid
+                        if ($consumption < 0) {
+                            $consumption = 0;
+                        }
+
+                        if ($partno !== '' && isset($partnoCustomerMap[$partno])) {
+                            foreach ($partnoCustomerMap[$partno] as $customer) {
+                                if (!isset($customerConsumptionMap[$customer])) {
+                                    $customerConsumptionMap[$customer] = 0;
+                                }
+                                $customerConsumptionMap[$customer] += $consumption;
+                            }
+                        }
+                    }
+
+                    // Calculate estimatedConsumption and store consumption for each customer in the result
+                    foreach ($data as $item) {
+                        $customer = $item->customer;
+                        $totalOnhand = (float) ($item->total_onhand ?? 0);
+                        $totalConsumption = (float) ($customerConsumptionMap[$customer] ?? 0);
+
+                        // Store consumption
+                        $consumptionMap[$customer] = $totalConsumption;
+
+                        // Calculate estimatedConsumption
+                        if ($totalConsumption > 0) {
+                            $estimatedConsumption = round($totalOnhand / $totalConsumption, 2);
+                        } else {
+                            $estimatedConsumption = 0;
+                        }
+
+                        $estimatedConsumptionMap[$customer] = $estimatedConsumption;
+                    }
+                }
+            } catch (\Exception $e) {
+                // If plan_date parsing fails, skip estimatedConsumption calculation
+                // Log error if needed: \Log::error('Stock Use Planning error: ' . $e->getMessage());
+            }
+        }
+
+        // Add estimatedConsumption and qty_delivery to each item
+        $data = $data->map(function ($item) use ($estimatedConsumptionMap, $consumptionMap) {
+            $item->estimatedConsumption = (float) ($estimatedConsumptionMap[$item->customer] ?? 0);
+            $item->qty_delivery = (float) ($consumptionMap[$item->customer] ?? 0);
+            return $item;
+        });
+
         return response()->json([
             'data' => $data,
             'filters' => [
@@ -2366,7 +2560,7 @@ class Dashboard1RevisionController extends ApiController
                 $stockStatus = 'Critical';
             } elseif ($estimatedConsumption <= 3) {
                 $stockStatus = 'Low Stock';
-            } elseif ($estimatedConsumption <= 9) {
+            } elseif ($estimatedConsumption <= 6) {
                 $stockStatus = 'Normal';
             } else {
                 $stockStatus = 'Overstock';
@@ -2394,6 +2588,201 @@ class Dashboard1RevisionController extends ApiController
                 'date_from' => $dateFromParsed,
                 'date_to' => $dateToParsed,
                 'group_type' => $groupType,
+                'search' => $search
+            ],
+            'snapshot_date' => $latestSnapshotDate,
+            'pagination' => [
+                'total' => $total,
+                'per_page' => $perPage,
+                'current_page' => $page,
+                'last_page' => $perPage > 0 ? (int) ceil($total / $perPage) : 1,
+                'from' => $total > 0 ? $offset + 1 : 0,
+                'to' => min($offset + $perPage, $total)
+            ]
+        ]);
+    }
+
+    /**
+     * TABLE: Finish Good Stock Level Detail
+     * Provides paginated table with detail per partno for FG warehouses
+     * Includes daily_use (from WhDeliveryPlan) and estimatedConsumption
+     */
+    public function finishGoodStockLevelDetail(Request $request): JsonResponse
+    {
+        // Get warehouse parameter - validate it's an FG warehouse
+        $warehouse = $this->getWarehouse($request);
+        $fgWarehouses = ['WHFG01', 'WHFG02'];
+        
+        if (!in_array($warehouse, $fgWarehouses)) {
+            return response()->json([
+                'error' => 'This endpoint is only available for FG warehouses (WHFG01, WHFG02)'
+            ], 400);
+        }
+
+        // Get pagination parameters
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = min(200, max(10, (int) $request->input('per_page', 50)));
+        $offset = ($page - 1) * $perPage;
+
+        // Get date range for daily use filtering
+        $dateFrom = $request->input('date_from');
+        $dateTo = $request->input('date_to');
+        
+        // Default to current date if not provided
+        if (!$dateFrom && !$dateTo) {
+            $dateFrom = Carbon::now()->format('Y-m-d');
+            $dateTo = Carbon::now()->format('Y-m-d');
+        } elseif (!$dateFrom) {
+            $dateFrom = $dateTo;
+        } elseif (!$dateTo) {
+            $dateTo = $dateFrom;
+        }
+
+        // Parse dates
+        try {
+            $dateFromParsed = Carbon::parse($dateFrom)->format('Y-m-d');
+            $dateToParsed = Carbon::parse($dateTo)->format('Y-m-d');
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => 'Invalid date format. Please use Y-m-d format.'
+            ], 400);
+        }
+
+
+        // Get customer filter parameter
+        $customer = $request->input('customer');
+        
+        // Get search parameter for partno
+        $search = $request->input('search');
+
+        // Get stock data from stockbywh for basic information
+        $stockQuery = DB::connection('erp')
+            ->table('stockbywh as s')
+            ->where('s.warehouse', $warehouse)
+            ->whereNotNull('s.partno');
+
+        // Apply customer filter if provided
+        if ($customer) {
+            $stockQuery->where('s.customer', $customer);
+        }
+        
+        // Apply search filter if provided
+        if ($search) {
+            $stockQuery->where('s.partno', 'LIKE', "%{$search}%");
+        }
+
+        // Get total count for pagination
+        $total = (clone $stockQuery)->count();
+
+        // Get paginated stock data with sorting by partno
+        $stockData = (clone $stockQuery)
+            ->select(
+                's.partno',
+                's.desc',
+                's.location',
+                's.customer',
+                's.warehouse',
+                DB::raw('CAST(s.min_stock AS DECIMAL(18,2)) as min_stock'),
+                DB::raw('CAST(s.max_stock AS DECIMAL(18,2)) as max_stock')
+            )
+            ->orderBy('s.partno')
+            ->offset($offset)
+            ->limit($perPage)
+            ->get();
+
+        // Get latest snapshot date for this warehouse within the date range
+        $latestSnapshotDate = StockByWhSnapshot::where('warehouse', $warehouse)
+            ->whereBetween('snapshot_date', [$dateFromParsed, $dateToParsed])
+            ->max('snapshot_date');
+
+        // Get onhand data from stock_by_wh_snapshots (latest snapshot in date range)
+        // If no snapshot exists, onhand will default to 0
+        $snapshotOnhandMap = [];
+        
+        if ($latestSnapshotDate) {
+            $snapshotQuery = StockByWhSnapshot::where('warehouse', $warehouse)
+                ->where('snapshot_date', $latestSnapshotDate)
+                ->whereNotNull('partno');
+            
+            // Apply customer filter if provided
+            if ($customer) {
+                $snapshotQuery->where('customer', $customer);
+            }
+            
+            // Apply search filter if provided
+            if ($search) {
+                $snapshotQuery->where('partno', 'LIKE', "%{$search}%");
+            }
+            
+            $snapshotData = $snapshotQuery->select('partno', 'onhand')->get();
+
+            foreach ($snapshotData as $snapshot) {
+                $partno = trim((string) $snapshot->partno);
+                if ($partno !== '') {
+                    $snapshotOnhandMap[$partno] = (float) ($snapshot->onhand ?? 0);
+                }
+            }
+        }
+
+        // Get WhDeliveryPlan data for the date range
+        $partnoQtyDeliveryMap = $this->getDeliveryPlanDataForDateRange(
+            $warehouse,
+            $dateFromParsed,
+            $dateToParsed
+        );
+
+        // Process stock data and add qty_delivery and estimatedConsumption
+        $processedData = [];
+        foreach ($stockData as $item) {
+            $partno = trim((string) $item->partno);
+            
+            // Get onhand from snapshot (default to 0 if not found)
+            $onhand = $snapshotOnhandMap[$partno] ?? 0;
+            $qtyDelivery = (float) ($partnoQtyDeliveryMap[$partno] ?? 0);
+
+            // Calculate estimatedConsumption
+            if ($qtyDelivery > 0) {
+                $estimatedConsumption = $onhand / $qtyDelivery;
+            } else {
+                $estimatedConsumption = 0;
+            }
+
+            // Determine stock status based on estimatedConsumption
+            // Check qtyDelivery = 0 first (no data uploaded yet)
+            if ($qtyDelivery === 0.0) {
+                $stockStatus = 'Undefined';
+            } elseif ($estimatedConsumption <= 0) {
+                $stockStatus = 'Critical';
+            } elseif ($estimatedConsumption <= 3) {
+                $stockStatus = 'Low Stock';
+            } elseif ($estimatedConsumption <= 6) {
+                $stockStatus = 'Normal';
+            } else {
+                $stockStatus = 'Overstock';
+            }
+
+            $processedData[] = [
+                'partno' => $partno,
+                'desc' => $item->desc ?? '',
+                'location' => $item->location ?? '',
+                'customer' => $item->customer ?? '',
+                'warehouse' => $item->warehouse ?? '',
+                'onhand' => round($onhand, 2),
+                'min_stock' => round((float) ($item->min_stock ?? 0), 2),
+                'max_stock' => round((float) ($item->max_stock ?? 0), 2),
+                'qty_delivery' => round($qtyDelivery, 2),
+                'estimated_consumption' => round($estimatedConsumption, 2),
+                'stock_status' => $stockStatus
+            ];
+        }
+
+        return response()->json([
+            'data' => $processedData,
+            'filters' => [
+                'warehouse' => $warehouse,
+                'date_from' => $dateFromParsed,
+                'date_to' => $dateToParsed,
+                'customer' => $customer,
                 'search' => $search
             ],
             'snapshot_date' => $latestSnapshotDate,
