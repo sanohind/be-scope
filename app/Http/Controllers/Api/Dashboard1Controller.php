@@ -515,8 +515,7 @@ class Dashboard1Controller extends ApiController
                 'low' => 0,
                 'normal' => 0,
                 'overstock' => 0,
-                'no_daily_use' => 0,
-                'no_qty_delivery' => 0
+                'undefined' => 0
             ];
 
             foreach ($stockItems as $item) {
@@ -534,11 +533,7 @@ class Dashboard1Controller extends ApiController
                     }
                     
                     if ($dailyUse == 0) {
-                        if (in_array($wh, $rmWarehouses)) {
-                            $counts['no_daily_use']++;
-                        } else {
-                            $counts['no_qty_delivery']++;
-                        }
+                        $counts['undefined']++;
                         continue; 
                     } elseif ($est <= 0) {
                         $counts['critical']++;
@@ -573,8 +568,7 @@ class Dashboard1Controller extends ApiController
                 'low' => $counts['low'],
                 'normal' => $counts['normal'],
                 'overstock' => $counts['overstock'],
-                'no_daily_use' => $counts['no_daily_use'],
-                'no_qty_delivery' => $counts['no_qty_delivery']
+                'undefined' => $counts['undefined']
             ];
         }
 
