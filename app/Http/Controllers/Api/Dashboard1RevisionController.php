@@ -29,11 +29,11 @@ class Dashboard1RevisionController extends ApiController
 
         // Warehouse group aliases
         $aliases = [
-            'RM' => ['WHRM01', 'WHRM02', 'WHMT01'],
+            'RM' => ['WHRM01', 'WHRM02', 'WHRM03', 'WHMT01'],
             'FG' => ['WHFG01', 'WHFG02'],
         ];
 
-        $validWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+        $validWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHRM03', 'WHFG01', 'WHFG02', 'RM', 'FG'];
 
         // Check if warehouse is an alias
         if (isset($aliases[$warehouse])) {
@@ -405,7 +405,7 @@ class Dashboard1RevisionController extends ApiController
         
         // Check warehouse type
         $fgWarehouses = ['WHFG01', 'WHFG02'];
-        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHRM03', 'WHMT01'];
         
         // Use estimated consumption logic for both RM and FG warehouses
         if (in_array($warehouse, $rmWarehouses) || in_array($warehouse, $fgWarehouses)) {
@@ -580,7 +580,7 @@ class Dashboard1RevisionController extends ApiController
 
         // Check if warehouse uses estimatedConsumption logic
         // Check if warehouse uses estimatedConsumption logic
-        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHRM03', 'WHMT01'];
         $fgWarehouses = ['WHFG01', 'WHFG02'];
         // Use estimated consumption logic for both RM and FG warehouses
         $useEstimatedConsumption = in_array($warehouse, $rmWarehouses) || in_array($warehouse, $fgWarehouses);
@@ -2220,7 +2220,7 @@ class Dashboard1RevisionController extends ApiController
 
         // Check if warehouse uses estimatedConsumption logic
         // Check if warehouse uses estimatedConsumption logic
-        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHRM03', 'WHMT01'];
         $fgWarehouses = ['WHFG01', 'WHFG02'];
         // Use estimated consumption logic for both RM and FG warehouses
         $useEstimatedConsumption = in_array($warehouse, $rmWarehouses) || in_array($warehouse, $fgWarehouses);
@@ -2416,11 +2416,11 @@ class Dashboard1RevisionController extends ApiController
     {
         // Get warehouse parameter - validate it's an RM warehouse
         $warehouse = $this->getWarehouse($request);
-        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHMT01'];
+        $rmWarehouses = ['WHRM01', 'WHRM02', 'WHRM03', 'WHMT01'];
         
         if (!in_array($warehouse, $rmWarehouses)) {
             return response()->json([
-                'error' => 'This endpoint is only available for RM warehouses (WHRM01, WHRM02, WHMT01)'
+                'error' => 'This endpoint is only available for RM warehouses (WHRM01, WHRM02, WHRM03, WHMT01)'
             ], 400);
         }
 

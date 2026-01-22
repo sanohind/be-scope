@@ -23,11 +23,11 @@ class Dashboard2RevisionController extends ApiController
         }
 
         $aliases = [
-            'RM' => ['WHRM01', 'WHRM02', 'WHMT01'],
+            'RM' => ['WHRM01', 'WHRM02','WHRM03', 'WHMT01'],
             'FG' => ['WHFG01', 'WHFG02'],
         ];
 
-        $validWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02', 'RM'];
+        $validWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHRM03', 'WHFG01', 'WHFG02', 'RM', 'FG'];
 
         if (isset($aliases[$warehouse])) {
             return [

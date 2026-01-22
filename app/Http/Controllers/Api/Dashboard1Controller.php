@@ -16,7 +16,7 @@ class Dashboard1Controller extends ApiController
     /**
      * Default warehouse list when no filter supplied.
      */
-    private array $defaultWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHFG01', 'WHFG02'];
+    private array $defaultWarehouses = ['WHMT01', 'WHRM01', 'WHRM02', 'WHRM03', 'WHFG01', 'WHFG02'];
 
     /**
      * Resolve warehouse codes based on request input.
@@ -27,7 +27,7 @@ class Dashboard1Controller extends ApiController
         $warehouseParam = $request->input('warehouse');
 
         $aliases = [
-            'RM' => ['WHRM01', 'WHRM02', 'WHMT01'],
+            'RM' => ['WHRM01', 'WHRM02', 'WHRM03', 'WHMT01'],
             'FG' => ['WHFG01', 'WHFG02'],
             'WHFG01' => ['WHFG01'],
             'WHFG02' => ['WHFG02']
@@ -221,7 +221,7 @@ class Dashboard1Controller extends ApiController
         $criticalItems = 0;
         
         // Separate warehouses by type
-        $rmWarehouses = array_intersect($warehouses, ['WHRM01', 'WHRM02', 'WHMT01']);
+        $rmWarehouses = array_intersect($warehouses, ['WHRM01', 'WHRM02', 'WHRM03', 'WHMT01']);
         $fgWarehouses = array_intersect($warehouses, ['WHFG01', 'WHFG02']);
         
         // Calculate critical items for FG warehouses (onhand < min_stock)
