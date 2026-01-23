@@ -8,6 +8,7 @@ use App\Models\AsakaiChart;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
+use Barryvdh\DomPDF\Facade\Pdf;
 
 class AsakaiReasonController extends ApiController
 {
@@ -475,6 +476,90 @@ class AsakaiReasonController extends ApiController
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to fetch reasons',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Export asakai reasons to PDF.
+     * 
+     * Query Parameters:
+     * - asakai_title_id: Filter by asakai title ID (required or optional)
+     * - date_from: Start date for filtering (required)
+     * - date_to: End date for filtering (required)
+     * - section: Filter by section
+     */
+    public function exportPdf(Request $request)
+    {
+        try {
+            // Get date range parameters
+            $dateFrom = $request->get('date_from');
+            $dateTo = $request->get('date_to');
+
+            // Validate required parameters
+            if (!$dateFrom || !$dateTo) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'date_from and date_to are required',
+                    'error' => 'Please provide both date_from and date_to parameters'
+                ], 422);
+            }
+
+            // Build query to get reasons through asakai_charts
+            $query = AsakaiReason::with(['asakaiChart.asakaiTitle', 'user'])
+                ->whereHas('asakaiChart', function($q) use ($dateFrom, $dateTo, $request) {
+                    // Filter by date range on asakai_charts
+                    $q->whereBetween('date', [$dateFrom, $dateTo]);
+                    
+                    // Filter by asakai_title_id if provided
+                    if ($request->has('asakai_title_id')) {
+                        $q->where('asakai_title_id', $request->asakai_title_id);
+                    }
+                });
+
+            // Filter by section if provided
+            if ($request->has('section')) {
+                $query->where('section', $request->section);
+            }
+
+            // Search by part_no if provided
+            if ($request->has('search')) {
+                $query->where('part_no', 'like', '%' . $request->search . '%');
+            }
+
+            // Get all reasons ordered by date
+            $reasons = $query->orderBy('date', 'desc')->get();
+
+            // Determine month and year from date_from
+            $month = date('F', strtotime($dateFrom));
+            $year = date('Y', strtotime($dateFrom));
+
+            // Determine dept from section filter or leave empty
+            $dept = $request->has('section') ? strtoupper($request->section) : '';
+
+            // Get title name if asakai_title_id is provided
+            $titleName = '';
+            if ($request->has('asakai_title_id') && $reasons->isNotEmpty()) {
+                $titleName = $reasons->first()->asakaiChart->asakaiTitle->title ?? '';
+            }
+
+            $pdf = Pdf::loadView('pdf.asakai_reasons', [
+                'reasons' => $reasons,
+                'month' => $month,
+                'year' => $year,
+                'dept' => $dept,
+                'titleName' => $titleName,
+                'dateFrom' => $dateFrom,
+                'dateTo' => $dateTo
+            ]);
+
+            return $pdf->download('asakai_reasons.pdf');
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to export PDF',
                 'error' => $e->getMessage()
             ], 500);
         }

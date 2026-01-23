@@ -324,6 +324,7 @@ Route::prefix('asakai')->group(function () {
     
     // Asakai Reasons
     Route::get('/reasons', [AsakaiReasonController::class, 'index']);
+    Route::get('/reasons/export-pdf', [AsakaiReasonController::class, 'exportPdf']);
     Route::post('/reasons', [AsakaiReasonController::class, 'store']);
     Route::get('/reasons/{id}', [AsakaiReasonController::class, 'show']);
     Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update']);
