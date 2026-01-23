@@ -16,6 +16,6 @@ class AsakaiTarget extends Model
     protected $casts = [
         'year' => 'integer',
         'period' => 'integer',
-        'target' => 'integer',
+        'target' => 'decimal:2',
     ];
 }

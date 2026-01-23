@@ -715,7 +715,7 @@ class AsakaiChartController extends ApiController
                 'asakai_title_id' => 'required|exists:asakai_titles,id',
                 'year' => 'required|integer|min:2000|max:2100',
                 'period' => 'required|integer|min:1|max:12',
-                'target' => 'required|integer|min:0',
+                'target' => 'required|numeric|min:0',
             ]);
 
             if ($validator->fails()) {
@@ -729,7 +729,7 @@ class AsakaiChartController extends ApiController
             $asakaiTitleId = $request->input('asakai_title_id');
             $year = (int) $request->input('year');
             $period = (int) $request->input('period');
-            $target = (int) $request->input('target');
+            $target = $request->input('target'); // Keep as numeric, don't cast to int
 
             $record = AsakaiTarget::updateOrCreate(
                 [

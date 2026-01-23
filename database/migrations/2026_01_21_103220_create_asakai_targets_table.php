@@ -16,7 +16,7 @@ return new class extends Migration
             $table->foreignId('asakai_title_id')->constrained('asakai_titles')->onDelete('cascade');
             $table->integer('year');
             $table->integer('period'); // 1-12 for months
-            $table->integer('target')->default(0);
+            $table->decimal('target', 10, 2)->default(0);
             $table->timestamps();
 
             // Unique constraint: one record per title + year + period
