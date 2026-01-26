@@ -490,6 +490,11 @@ class AsakaiChartController extends ApiController
                 ->whereBetween('date', [$dateFrom->format('Y-m-d'), $dateTo->format('Y-m-d')])
                 ->get();
 
+            // Fetch Targets
+            $targets = AsakaiTarget::where('asakai_title_id', $request->asakai_title_id)
+                ->whereBetween('year', [$dateFrom->year, $dateTo->year])
+                ->get();
+
             // Group data by period
             $chartsByPeriod = $charts->groupBy(function ($item) use ($period) {
                 if ($period === 'monthly') {
@@ -504,7 +509,7 @@ class AsakaiChartController extends ApiController
             $allDates = $this->generateDateRange($dateFrom, $dateTo, $period);
 
             // Fill missing dates with qty = 0
-            $data = collect($allDates)->map(function ($date) use ($chartsByPeriod, $request, $period) {
+            $data = collect($allDates)->map(function ($date) use ($chartsByPeriod, $request, $period, $targets) {
                 $dateKey = $date->format('Y-m-d');
                 
                 // Determine lookup key based on period
@@ -516,12 +521,31 @@ class AsakaiChartController extends ApiController
                     $lookupKey = $date->format('Y-m-d');
                 }
                 
+                // Calculate Target
+                $targetVal = 0;
+                if ($period === 'yearly') {
+                    $yearTargets = $targets->where('year', $date->year);
+                    $targetVal = $yearTargets->count() > 0 ? $yearTargets->avg('target') : 0;
+                } else {
+                    // For daily and monthly, target is based on month/year
+                    $targetParams = $targets->where('year', $date->year)->where('period', $date->month)->first();
+                    $targetVal = $targetParams ? $targetParams->target : 0;
+                }
+
                 if ($chartsByPeriod->has($lookupKey)) {
                     $group = $chartsByPeriod->get($lookupKey);
                     $chart = $group->first(); // Use first chart for metadata like ID
                     
                     // Aggregate qty
-                    $qty = $group->sum('qty');
+                    if ($period === 'monthly') {
+                        // Monthly: Sum of days / 22 (fixed working days)
+                        $qty = $group->sum('qty') / 22;
+                    } elseif ($period === 'yearly') {
+                        // Yearly: Sum of days / (22 * 12) = 264
+                        $qty = $group->sum('qty') / 264;
+                    } else {
+                        $qty = $group->sum('qty');
+                    }
                     
                     // Aggregate reasons
                     $reasons = $group->flatMap(function ($item) {
@@ -547,6 +571,7 @@ class AsakaiChartController extends ApiController
                     return [
                         'date' => $dateKey,
                         'qty' => $qty,
+                        'target' => $targetVal,
                         'has_data' => true,
                         'chart_id' => $chart->id,
                         'reasons' => $reasons,
@@ -556,6 +581,7 @@ class AsakaiChartController extends ApiController
                     return [
                         'date' => $dateKey,
                         'qty' => 0,
+                        'target' => $targetVal,
                         'has_data' => false,
                         'chart_id' => null,
                         'reasons' => [],
