@@ -54,6 +54,8 @@ return [
 
     'url' => env('APP_URL', 'http://localhost'),
 
+    'be_sphere_url' => env('BE_SPHERE_URL', 'http://127.0.0.1:8000'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Timezone

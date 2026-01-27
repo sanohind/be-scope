@@ -153,6 +153,21 @@ return [
             'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', true),
         ],
 
+        'sphere' => [
+            'driver' => 'mysql',
+            'host' => env('DB_HOST2', '10.1.10.137'),
+            'port' => env('DB_PORT2', '3306'),
+            'database' => env('DB_DATABASE2', 'be_sphere'),
+            'username' => env('DB_USERNAME2', 'laraveluser'),
+            'password' => env('DB_PASSWORD2', 'passwordku'),
+            'charset' => 'utf8mb4',
+            'collation' => 'utf8mb4_unicode_ci',
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'strict' => true,
+            'engine' => null,
+        ],
+
     ],
 
     /*
