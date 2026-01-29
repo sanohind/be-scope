@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Local Auth API</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .test-section {
+            background: #f5f5f5;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        pre {
+            background: #fff;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>SCOPE Local Auth API Test</h1>
+    
+    <div class="test-section">
+        <h2>1. Test Login</h2>
+        <button onclick="testLogin('admin', 'admin123')">Login as Admin</button>
+        <button onclick="testLogin('user', 'user123')">Login as User</button>
+        <button onclick="testLogin('wrong', 'wrong')">Login with Wrong Credentials</button>
+        <pre id="login-result">Click a button to test login...</pre>
+    </div>
+
+    <div class="test-section">
+        <h2>2. Test Get User Info</h2>
+        <button onclick="testGetMe()">Get Current User</button>
+        <pre id="me-result">Login first, then click to get user info...</pre>
+    </div>
+
+    <div class="test-section">
+        <h2>3. Test Logout</h2>
+        <button onclick="testLogout()">Logout</button>
+        <pre id="logout-result">Login first, then click to logout...</pre>
+    </div>
+
+    <script>
+        const API_URL = 'http://127.0.0.1:8000/api';
+        let currentToken = null;
+
+        async function testLogin(username, password) {
+            const resultEl = document.getElementById('login-result');
+            resultEl.textContent = 'Testing login...';
+
+            try {
+                const response = await fetch(`${API_URL}/local-auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password }),
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    currentToken = data.token;
+                    resultEl.innerHTML = `<span class="success">✅ Login Success!</span>\n\n${JSON.stringify(data, null, 2)}`;
+                } else {
+                    resultEl.innerHTML = `<span class="error">❌ Login Failed!</span>\n\n${JSON.stringify(data, null, 2)}`;
+                }
+            } catch (error) {
+                resultEl.innerHTML = `<span class="error">❌ Error:</span>\n\n${error.message}`;
+            }
+        }
+
+        async function testGetMe() {
+            const resultEl = document.getElementById('me-result');
+            
+            if (!currentToken) {
+                resultEl.innerHTML = '<span class="error">❌ Please login first!</span>';
+                return;
+            }
+
+            resultEl.textContent = 'Getting user info...';
+
+            try {
+                const response = await fetch(`${API_URL}/local-auth/me`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${currentToken}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultEl.innerHTML = `<span class="success">✅ Success!</span>\n\n${JSON.stringify(data, null, 2)}`;
+                } else {
+                    resultEl.innerHTML = `<span class="error">❌ Failed!</span>\n\n${JSON.stringify(data, null, 2)}`;
+                }
+            } catch (error) {
+                resultEl.innerHTML = `<span class="error">❌ Error:</span>\n\n${error.message}`;
+            }
+        }
+
+        async function testLogout() {
+            const resultEl = document.getElementById('logout-result');
+            
+            if (!currentToken) {
+                resultEl.innerHTML = '<span class="error">❌ Please login first!</span>';
+                return;
+            }
+
+            resultEl.textContent = 'Logging out...';
+
+            try {
+                const response = await fetch(`${API_URL}/local-auth/logout`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${currentToken}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    currentToken = null;
+                    resultEl.innerHTML = `<span class="success">✅ Logout Success!</span>\n\n${JSON.stringify(data, null, 2)}`;
+                } else {
+                    resultEl.innerHTML = `<span class="error">❌ Logout Failed!</span>\n\n${JSON.stringify(data, null, 2)}`;
+                }
+            } catch (error) {
+                resultEl.innerHTML = `<span class="error">❌ Error:</span>\n\n${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>

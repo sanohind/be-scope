@@ -2,8 +2,8 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
 use App\Models\User;
+use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
 
 class UserSeeder extends Seeder
@@ -13,24 +13,24 @@ class UserSeeder extends Seeder
      */
     public function run(): void
     {
-        // Create a default system user for development
+        // Create superadmin
         User::create([
-            'name' => 'System Admin',
-            'email' => 'admin@scope.com',
-            'password' => Hash::make('password123'),
+            'username' => 'admin',
+            'name' => 'Administrator',
+            'email' => 'admin@scope.local',
+            'password' => Hash::make('admin123'), // Change this in production!
+            'role' => 'superadmin',
+            'is_active' => true,
         ]);
 
-        // Create additional dummy users if needed
+        // Create regular user
         User::create([
-            'name' => 'John Doe',
-            'email' => 'john@scope.com',
-            'password' => Hash::make('password123'),
-        ]);
-
-        User::create([
-            'name' => 'Jane Smith',
-            'email' => 'jane@scope.com',
-            'password' => Hash::make('password123'),
+            'username' => 'user',
+            'name' => 'Regular User',
+            'email' => 'user@scope.local',
+            'password' => Hash::make('user123'), // Change this in production!
+            'role' => 'user',
+            'is_active' => true,
         ]);
     }
 }

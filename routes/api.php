@@ -31,6 +31,7 @@ use App\Http\Controllers\Api\AsakaiTitleController;
 use App\Http\Controllers\Api\AsakaiChartController;
 use App\Http\Controllers\Api\AsakaiReasonController;
 use App\Http\Controllers\Api\WhDeliveryPlanController;
+use App\Http\Controllers\Api\LocalAuthController;
 
 /*
 |--------------------------------------------------------------------------
@@ -42,6 +43,15 @@ use App\Http\Controllers\Api\WhDeliveryPlanController;
 | be assigned to the "api" middleware group. Make something great!
 |
 */
+
+// Local Authentication Routes (Sanctum)
+Route::prefix('local-auth')->group(function () {
+    Route::post('/login', [LocalAuthController::class, 'login']);
+    Route::middleware('auth:sanctum')->group(function () {
+        Route::post('/logout', [LocalAuthController::class, 'logout']);
+        Route::get('/me', [LocalAuthController::class, 'me']);
+    });
+});
 
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
