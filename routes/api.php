@@ -73,6 +73,32 @@ Route::middleware('jwt.auth')->get('/test-auth', function (Request $request) {
     ]);
 });
 
+// SSO Authentication endpoint - used by frontend to verify token
+Route::middleware('jwt.auth')->post('/auth/user', function (Request $request) {
+    $user = $request->get('auth_user');
+    return response()->json([
+        'success' => true,
+        'user' => [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'username' => $user->username,
+            'nik' => $user->nik,
+            'role' => $user->role ? [
+                'id' => $user->role->id,
+                'name' => $user->role->name,
+                'slug' => $user->role->slug,
+                'level' => $user->role->level,
+            ] : null,
+            'department' => $user->department ? [
+                'id' => $user->department->id,
+                'name' => $user->department->name,
+                'code' => $user->department->code,
+            ] : null,
+        ]
+    ]);
+});
+
 Route::get('/test-sphere-connection', function () {
     try {
         // Test database connection
