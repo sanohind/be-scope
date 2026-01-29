@@ -47,6 +47,57 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
 
+// Test endpoints for Sphere SSO integration
+Route::middleware('jwt.auth')->get('/test-auth', function (Request $request) {
+    $user = $request->get('auth_user');
+    return response()->json([
+        'success' => true,
+        'message' => 'Authentication successful',
+        'user' => [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'username' => $user->username,
+            'nik' => $user->nik,
+            'role' => $user->role ? [
+                'id' => $user->role->id,
+                'name' => $user->role->name,
+                'slug' => $user->role->slug,
+            ] : null,
+            'department' => $user->department ? [
+                'id' => $user->department->id,
+                'name' => $user->department->name,
+                'code' => $user->department->code,
+            ] : null,
+        ]
+    ]);
+});
+
+Route::get('/test-sphere-connection', function () {
+    try {
+        // Test database connection
+        $pdo = DB::connection('sphere')->getPdo();
+
+        // Count users
+        $userCount = \App\Models\External\SphereUser::count();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Sphere database connection successful',
+            'data' => [
+                'total_users' => $userCount,
+                'connection' => 'sphere',
+            ]
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Database connection failed',
+            'error' => $e->getMessage()
+        ], 500);
+    }
+});
+
 Route::get('/stock/daily', [DailyStockController::class, 'index']);
 
 // Daily Use WH API Routes
@@ -307,13 +358,13 @@ Route::prefix('asakai')->group(function () {
     // Asakai Titles (Master Data)
     Route::get('/titles', [AsakaiTitleController::class, 'index']);
     Route::get('/titles/{id}', [AsakaiTitleController::class, 'show']);
-    
+
     // Asakai Charts
     Route::get('/charts', [AsakaiChartController::class, 'index']);
     Route::post('/charts', [AsakaiChartController::class, 'store']);
     Route::get('/charts/data', [AsakaiChartController::class, 'getChartData']); // Get chart data with filled dates
     Route::get('/charts/available-dates', [AsakaiChartController::class, 'getAvailableDates']);
-    
+
     // Target Routes
     Route::get('/charts/target', [AsakaiChartController::class, 'getTarget']);
     Route::post('/charts/target', [AsakaiChartController::class, 'storeTarget']);
@@ -321,7 +372,7 @@ Route::prefix('asakai')->group(function () {
     Route::get('/charts/{id}', [AsakaiChartController::class, 'show']);
     Route::put('/charts/{id}', [AsakaiChartController::class, 'update']);
     Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy']);
-    
+
     // Asakai Reasons
     Route::get('/reasons', [AsakaiReasonController::class, 'index']);
     Route::get('/reasons/export-pdf', [AsakaiReasonController::class, 'exportPdf']);

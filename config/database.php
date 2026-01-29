@@ -155,11 +155,11 @@ return [
 
         'sphere' => [
             'driver' => 'mysql',
-            'host' => env('DB_HOST2', '10.1.10.137'),
-            'port' => env('DB_PORT2', '3306'),
-            'database' => env('DB_DATABASE2', 'be_sphere'),
-            'username' => env('DB_USERNAME2', 'laraveluser'),
-            'password' => env('DB_PASSWORD2', 'passwordku'),
+            'host' => env('DB_HOST5', '127.0.0.1'),
+            'port' => env('DB_PORT5', '3306'),
+            'database' => env('DB_DATABASE5', 'be_sphere'),
+            'username' => env('DB_USERNAME5', 'root'),
+            'password' => env('DB_PASSWORD5', ''),
             'charset' => 'utf8mb4',
             'collation' => 'utf8mb4_unicode_ci',
             'prefix' => '',
@@ -203,7 +203,7 @@ return [
 
         'options' => [
             'cluster' => env('REDIS_CLUSTER', 'redis'),
-            'prefix' => env('REDIS_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')).'-database-'),
+            'prefix' => env('REDIS_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')) . '-database-'),
             'persistent' => env('REDIS_PERSISTENT', false),
         ],
 
