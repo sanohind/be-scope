@@ -84,7 +84,7 @@ class AsakaiChartController extends ApiController
             }
 
             // Get existing chart data
-            $charts = $query->orderBy('date', 'desc')->get();
+            $charts = $query->orderBy('created_at', 'desc')->get();
 
             // Transform existing data and key by date
             $chartsByDate = $charts->map(function ($chart) {
