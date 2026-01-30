@@ -14,6 +14,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'jwt.auth' => \App\Http\Middleware\JwtAuthMiddleware::class,
+            'sanctum.api' => \App\Http\Middleware\SanctumApiAuth::class,
         ]);
         
         // Add custom CORS middleware for API routes
@@ -22,5 +23,18 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        // Handle authentication exceptions for API
+        $exceptions->render(function (\Illuminate\Auth\AuthenticationException $e, \Illuminate\Http\Request $request) {
+            // Always return JSON for API requests
+            if ($request->expectsJson() || $request->is('api/*')) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthenticated',
+                    'error' => 'Please login to access this resource'
+                ], 401);
+            }
+            
+            // For web requests, throw the exception to let Laravel handle it
+            throw $e;
+        });
     })->create();

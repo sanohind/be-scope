@@ -235,7 +235,7 @@ class AsakaiChartController extends ApiController
                 'asakai_title_id' => $request->asakai_title_id,
                 'date' => $request->date,
                 'qty' => $request->qty,
-                'user_id' => 1, // Dummy user for development
+                'user_id' => Auth::id(),
             ]);
 
             $chart->load(['asakaiTitle', 'user']);

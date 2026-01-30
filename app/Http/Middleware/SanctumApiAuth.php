@@ -5,18 +5,11 @@ namespace App\Http\Middleware;
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use App\Services\AuthService;
+use Laravel\Sanctum\PersonalAccessToken;
 use Symfony\Component\HttpFoundation\Response;
 
-class JwtAuthMiddleware
+class SanctumApiAuth
 {
-    protected $authService;
-
-    public function __construct(AuthService $authService)
-    {
-        $this->authService = $authService;
-    }
-
     /**
      * Handle an incoming request.
      *
@@ -24,39 +17,44 @@ class JwtAuthMiddleware
      */
     public function handle(Request $request, Closure $next): Response
     {
+        // Get the bearer token from the request
         $token = $request->bearerToken();
-
+        
         if (!$token) {
             return response()->json([
                 'success' => false,
-                'message' => 'Token not provided'
+                'message' => 'Unauthenticated',
+                'error' => 'Please login to access this resource'
             ], 401);
         }
 
-        $userData = $this->authService->validateToken($token);
-
-        if (!$userData) {
+        // Find the token in the database
+        $accessToken = PersonalAccessToken::findToken($token);
+        
+        if (!$accessToken) {
             return response()->json([
                 'success' => false,
-                'message' => 'Invalid or expired token'
+                'message' => 'Unauthenticated',
+                'error' => 'Invalid or expired token'
             ], 401);
         }
 
-        // Get full user data from Sphere database
-        $user = $this->authService->getUserFromSphere($userData['id']);
-
+        // Get the user associated with the token
+        $user = $accessToken->tokenable;
+        
         if (!$user) {
             return response()->json([
                 'success' => false,
-                'message' => 'User not found or inactive'
+                'message' => 'Unauthenticated',
+                'error' => 'User not found'
             ], 401);
         }
 
-        // Add user to request for use in controllers
-        $request->merge(['auth_user' => $user]);
-        
-        // Set user to Auth facade for standard Laravel auth methods
+        // Set the authenticated user for the request
         Auth::setUser($user);
+        $request->setUserResolver(function () use ($user) {
+            return $user;
+        });
 
         return $next($request);
     }

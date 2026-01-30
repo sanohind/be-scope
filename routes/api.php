@@ -390,7 +390,7 @@ Route::prefix('files')->group(function () {
 });
 
 // Asakai Board API Routes
-Route::prefix('asakai')->group(function () {
+Route::prefix('asakai')->middleware('auth:sanctum')->group(function () {
     // Asakai Titles (Master Data)
     Route::get('/titles', [AsakaiTitleController::class, 'index']);
     Route::get('/titles/{id}', [AsakaiTitleController::class, 'show']);

@@ -187,7 +187,7 @@ class AsakaiReasonController extends ApiController
                 'line' => $request->line,
                 'penyebab' => $request->penyebab,
                 'perbaikan' => $request->perbaikan,
-                'user_id' => 1, // Dummy user for development
+                'user_id' => Auth::id(),
             ]);
 
             $reason->load(['asakaiChart.asakaiTitle', 'user']);
