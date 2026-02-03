@@ -53,6 +53,12 @@ Route::prefix('local-auth')->group(function () {
     });
 });
 
+// ✅ SSO Authentication Routes (Sphere Token Validation)
+Route::prefix('auth')->middleware(\App\Http\Middleware\VerifySphereToken::class)->group(function () {
+    Route::get('/user', [\App\Http\Controllers\Api\SSOAuthController::class, 'user']);
+    Route::get('/verify', [\App\Http\Controllers\Api\SSOAuthController::class, 'verify']);
+});
+
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
