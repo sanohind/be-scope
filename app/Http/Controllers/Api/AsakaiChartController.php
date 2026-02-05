@@ -570,8 +570,8 @@ class AsakaiChartController extends ApiController
                     
                     return [
                         'date' => $dateKey,
-                        'qty' => $qty,
-                        'target' => $targetVal,
+                        'qty' => (float) $qty,
+                        'target' => (float) $targetVal,
                         'has_data' => true,
                         'chart_id' => $chart->id,
                         'reasons' => $reasons,
@@ -581,7 +581,7 @@ class AsakaiChartController extends ApiController
                     return [
                         'date' => $dateKey,
                         'qty' => 0,
-                        'target' => $targetVal,
+                        'target' => (float) $targetVal,
                         'has_data' => false,
                         'chart_id' => null,
                         'reasons' => [],
