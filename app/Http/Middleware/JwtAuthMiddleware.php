@@ -43,7 +43,8 @@ class JwtAuthMiddleware
         }
 
         // Get full user data from Sphere database
-        $user = $this->authService->getUserFromSphere($userData['id']);
+        // Pass userData to avoid unnecessary database query if data is already available
+        $user = $this->authService->getUserFromSphere($userData['id'], $userData);
 
         if (!$user) {
             return response()->json([
