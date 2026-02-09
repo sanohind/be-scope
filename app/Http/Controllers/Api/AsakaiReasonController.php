@@ -41,6 +41,13 @@ class AsakaiReasonController extends ApiController
                 $query->where('asakai_chart_id', $request->asakai_chart_id);
             }
 
+            // Filter by asakai_title_id (through asakaiChart relationship)
+            if ($request->has('asakai_title_id')) {
+                $query->whereHas('asakaiChart', function($q) use ($request) {
+                    $q->where('asakai_title_id', $request->asakai_title_id);
+                });
+            }
+
             // Apply period-specific date filtering
             $dateFrom = $request->get('date_from');
             $dateTo = $request->get('date_to');
