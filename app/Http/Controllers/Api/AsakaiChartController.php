@@ -14,6 +14,26 @@ use Carbon\Carbon;
 class AsakaiChartController extends ApiController
 {
     /**
+     * Get current authenticated user ID (OIDC / JWT compatible).
+     * Supports: auth_user (JwtAuthMiddleware), sphere_user (VerifySphereToken), Auth::id().
+     */
+    private function getCurrentUserId(Request $request): ?int
+    {
+        $authUser = $request->get('auth_user');
+        if ($authUser && is_object($authUser) && isset($authUser->id)) {
+            return (int) $authUser->id;
+        }
+        if (Auth::id()) {
+            return (int) Auth::id();
+        }
+        $sphereUser = $request->attributes->get('sphere_user');
+        if (is_array($sphereUser) && isset($sphereUser['id'])) {
+            return (int) $sphereUser['id'];
+        }
+        return null;
+    }
+
+    /**
      * Display a listing of asakai charts.
      * 
      * Query Parameters:
@@ -95,7 +115,7 @@ class AsakaiChartController extends ApiController
                     'category' => $chart->asakaiTitle->category,
                     'date' => $chart->date->format('Y-m-d'),
                     'qty' => $chart->qty,
-                    'user' => $chart->user->name,
+                    'user' => optional($chart->user)->name,
                     'user_id' => $chart->user_id,
                     'reasons_count' => $chart->reasons->count(),
                     'created_at' => $chart->created_at->format('Y-m-d H:i:s'),
@@ -231,11 +251,20 @@ class AsakaiChartController extends ApiController
                 ], 422);
             }
 
+            $userId = $this->getCurrentUserId($request);
+            if ($userId === null) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthenticated',
+                    'error' => 'User could not be determined. Please ensure you are logged in with OIDC/SSO.'
+                ], 401);
+            }
+
             $chart = AsakaiChart::create([
                 'asakai_title_id' => $request->asakai_title_id,
                 'date' => $request->date,
                 'qty' => $request->qty,
-                'user_id' => Auth::id(),
+                'user_id' => $userId,
             ]);
 
             $chart->load(['asakaiTitle', 'user']);
@@ -250,7 +279,7 @@ class AsakaiChartController extends ApiController
                     'category' => $chart->asakaiTitle->category,
                     'date' => $chart->date->format('Y-m-d'),
                     'qty' => $chart->qty,
-                    'user' => $chart->user->name,
+                    'user' => optional($chart->user)->name,
                     'user_id' => $chart->user_id,
                     'created_at' => $chart->created_at->format('Y-m-d H:i:s'),
                 ]
@@ -287,7 +316,7 @@ class AsakaiChartController extends ApiController
                 'category' => $chart->asakaiTitle->category,
                 'date' => $chart->date->format('Y-m-d'),
                 'qty' => $chart->qty,
-                'user' => $chart->user->name,
+                'user' => optional($chart->user)->name,
                 'user_id' => $chart->user_id,
                 'created_at' => $chart->created_at->format('Y-m-d H:i:s'),
                 'reasons' => $chart->reasons->map(function ($reason) {
@@ -302,7 +331,7 @@ class AsakaiChartController extends ApiController
                         'line' => $reason->line,
                         'penyebab' => $reason->penyebab,
                         'perbaikan' => $reason->perbaikan,
-                        'user' => $reason->user->name,
+                        'user' => optional($reason->user)->name,
                         'user_id' => $reason->user_id,
                         'created_at' => $reason->created_at->format('Y-m-d H:i:s'),
                     ];
@@ -383,7 +412,7 @@ class AsakaiChartController extends ApiController
                     'category' => $chart->asakaiTitle->category,
                     'date' => $chart->date->format('Y-m-d'),
                     'qty' => $chart->qty,
-                    'user' => $chart->user->name,
+                    'user' => optional($chart->user)->name,
                     'user_id' => $chart->user_id,
                     'updated_at' => $chart->updated_at->format('Y-m-d H:i:s'),
                 ]
@@ -562,7 +591,7 @@ class AsakaiChartController extends ApiController
                             'line' => $reason->line,
                             'penyebab' => $reason->penyebab,
                             'perbaikan' => $reason->perbaikan,
-                            'user' => $reason->user->name,
+                            'user' => optional($reason->user)->name,
                             'user_id' => $reason->user_id,
                             'created_at' => $reason->created_at->format('Y-m-d H:i:s'),
                         ];

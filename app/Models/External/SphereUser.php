@@ -3,9 +3,13 @@
 namespace App\Models\External;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Auth\Authenticatable as AuthenticatableTrait;
 
-class SphereUser extends Model
+class SphereUser extends Model implements Authenticatable
 {
+    use AuthenticatableTrait;
+
     protected $connection = 'sphere';
     protected $table = 'users';
     protected $primaryKey = 'id';

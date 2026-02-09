@@ -395,33 +395,34 @@ Route::prefix('files')->group(function () {
     Route::get('/download/{folder}/{filename}', [FileDownloadController::class, 'downloadFile']);
 });
 
-// Asakai Board API Routes
-Route::prefix('asakai')->middleware(['jwt.auth'])->group(function () {
+// Asakai Board API Routes (OIDC / JWT: AuthService validates token via be-sphere or Sphere JWT)
+// Asakai Board API Routes (Public read, Authenticated write)
+Route::prefix('asakai')->group(function () {
     // Asakai Titles (Master Data)
     Route::get('/titles', [AsakaiTitleController::class, 'index']);
     Route::get('/titles/{id}', [AsakaiTitleController::class, 'show']);
 
     // Asakai Charts
     Route::get('/charts', [AsakaiChartController::class, 'index']);
-    Route::post('/charts', [AsakaiChartController::class, 'store'])->middleware('role:admin,superadmin');
+    Route::post('/charts', [AsakaiChartController::class, 'store'])->middleware(['jwt.auth', 'role:admin,superadmin']);
     Route::get('/charts/data', [AsakaiChartController::class, 'getChartData']); // Get chart data with filled dates
     Route::get('/charts/available-dates', [AsakaiChartController::class, 'getAvailableDates']);
 
     // Target Routes
     Route::get('/charts/target', [AsakaiChartController::class, 'getTarget']);
-    Route::post('/charts/target', [AsakaiChartController::class, 'storeTarget'])->middleware('role:admin,superadmin');
-    Route::delete('/charts/target/{id}', [AsakaiChartController::class, 'destroyTarget'])->middleware('role:admin,superadmin');
+    Route::post('/charts/target', [AsakaiChartController::class, 'storeTarget'])->middleware(['jwt.auth', 'role:admin,superadmin']);
+    Route::delete('/charts/target/{id}', [AsakaiChartController::class, 'destroyTarget'])->middleware(['jwt.auth', 'role:admin,superadmin']);
     Route::get('/charts/{id}', [AsakaiChartController::class, 'show']);
-    Route::put('/charts/{id}', [AsakaiChartController::class, 'update'])->middleware('role:admin,superadmin');
-    Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy'])->middleware('role:admin,superadmin');
+    Route::put('/charts/{id}', [AsakaiChartController::class, 'update'])->middleware(['jwt.auth', 'role:admin,superadmin']);
+    Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy'])->middleware(['jwt.auth', 'role:admin,superadmin']);
 
     // Asakai Reasons
     Route::get('/reasons', [AsakaiReasonController::class, 'index']);
     Route::get('/reasons/export-pdf', [AsakaiReasonController::class, 'exportPdf']);
-    Route::post('/reasons', [AsakaiReasonController::class, 'store'])->middleware('role:admin,superadmin');
+    Route::post('/reasons', [AsakaiReasonController::class, 'store'])->middleware(['jwt.auth', 'role:admin,superadmin']);
     Route::get('/reasons/{id}', [AsakaiReasonController::class, 'show']);
-    Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware('role:admin,superadmin');
-    Route::delete('/reasons/{id}', [AsakaiReasonController::class, 'destroy'])->middleware('role:admin,superadmin');
+    Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth', 'role:admin,superadmin']);
+    Route::delete('/reasons/{id}', [AsakaiReasonController::class, 'destroy'])->middleware(['jwt.auth', 'role:admin,superadmin']);
     Route::get('/charts/{chartId}/reasons', [AsakaiReasonController::class, 'getByChart']);
 });
 

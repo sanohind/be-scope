@@ -16,8 +16,14 @@ class RoleMiddleware
      */
     public function handle(Request $request, Closure $next, ...$roles): Response
     {
-        // Prefer SSO user attached by JwtAuthMiddleware
+        // Prefer SSO user: JwtAuthMiddleware (auth_user) or VerifySphereToken (sphere_user)
         $user = $request->get('auth_user') ?? Auth::user();
+        if (!$user) {
+            $sphereUser = $request->attributes->get('sphere_user');
+            if (is_array($sphereUser) && !empty($sphereUser)) {
+                $user = $sphereUser;
+            }
+        }
 
         if (!$user) {
             return response()->json([
@@ -34,11 +40,14 @@ class RoleMiddleware
 
         $roleSlug = null;
 
+        // sphere_user array (VerifySphereToken / OIDC): role as string
+        if (is_array($user) && isset($user['role'])) {
+            $roleSlug = is_string($user['role']) ? $user['role'] : ($user['role']['slug'] ?? null);
+        }
         // SphereUser usually has relation role->slug
-        if (is_object($user) && isset($user->role) && is_object($user->role) && isset($user->role->slug)) {
+        if (!$roleSlug && is_object($user) && isset($user->role) && is_object($user->role) && isset($user->role->slug)) {
             $roleSlug = $user->role->slug;
         }
-
         // Fallback: some token payloads may provide role as string
         if (!$roleSlug && is_object($user) && isset($user->role) && is_string($user->role)) {
             $roleSlug = $user->role;
