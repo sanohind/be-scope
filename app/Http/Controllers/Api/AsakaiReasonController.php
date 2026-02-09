@@ -506,17 +506,16 @@ class AsakaiReasonController extends ApiController
                 ], 422);
             }
 
-            // Build query to get reasons through asakai_charts
+            // Build query to get reasons
             $query = AsakaiReason::with(['asakaiChart.asakaiTitle', 'user'])
-                ->whereHas('asakaiChart', function($q) use ($dateFrom, $dateTo, $request) {
-                    // Filter by date range on asakai_charts
-                    $q->whereBetween('date', [$dateFrom, $dateTo]);
-                    
-                    // Filter by asakai_title_id if provided
-                    if ($request->has('asakai_title_id')) {
-                        $q->where('asakai_title_id', $request->asakai_title_id);
-                    }
+                ->whereBetween('date', [$dateFrom, $dateTo]);
+
+            // Filter by asakai_title_id if provided
+            if ($request->has('asakai_title_id')) {
+                $query->whereHas('asakaiChart', function($q) use ($request) {
+                    $q->where('asakai_title_id', $request->asakai_title_id);
                 });
+            }
 
             // Filter by section if provided
             if ($request->has('section')) {
@@ -529,7 +528,24 @@ class AsakaiReasonController extends ApiController
             }
 
             // Get all reasons ordered by date
-            $reasons = $query->orderBy('date', 'desc')->get();
+            $reasonsCollection = $query->orderBy('date', 'desc')->get();
+
+            // Transform reasons to array format for PDF
+            $reasons = $reasonsCollection->map(function ($reason) {
+                return [
+                    'id' => $reason->id,
+                    'date' => $reason->date->format('Y-m-d'),
+                    'part_no' => $reason->part_no,
+                    'part_name' => $reason->part_name,
+                    'problem' => $reason->problem,
+                    'qty' => $reason->qty,
+                    'section' => $reason->section,
+                    'line' => $reason->line,
+                    'penyebab' => $reason->penyebab,
+                    'perbaikan' => $reason->perbaikan,
+                    'user' => optional($reason->user)->name,
+                ];
+            });
 
             // Determine month and year from date_from
             $month = date('F', strtotime($dateFrom));
@@ -540,8 +556,8 @@ class AsakaiReasonController extends ApiController
 
             // Get title name if asakai_title_id is provided
             $titleName = '';
-            if ($request->has('asakai_title_id') && $reasons->isNotEmpty()) {
-                $titleName = $reasons->first()->asakaiChart->asakaiTitle->title ?? '';
+            if ($request->has('asakai_title_id') && $reasonsCollection->isNotEmpty()) {
+                $titleName = $reasonsCollection->first()->asakaiChart->asakaiTitle->title ?? '';
             }
 
             $pdf = Pdf::loadView('pdf.asakai_reasons', [
