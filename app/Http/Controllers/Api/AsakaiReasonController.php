@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Api\ApiController;
 use App\Models\AsakaiReason;
 use App\Models\AsakaiChart;
+use App\Services\ScopeUserSyncService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
@@ -183,6 +184,16 @@ class AsakaiReasonController extends ApiController
                 ], 422);
             }
 
+            // Ensure SSO/Sphere user exists in be_scope.users so FK (user_id) is valid
+            $userId = app(ScopeUserSyncService::class)->ensureScopeUser($request);
+            if ($userId === null) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthenticated',
+                    'error' => 'User could not be determined. Please ensure you are logged in with OIDC/SSO.'
+                ], 401);
+            }
+
             $reason = AsakaiReason::create([
                 'asakai_chart_id' => $request->asakai_chart_id,
                 'date' => $request->date,
@@ -194,7 +205,7 @@ class AsakaiReasonController extends ApiController
                 'line' => $request->line,
                 'penyebab' => $request->penyebab,
                 'perbaikan' => $request->perbaikan,
-                'user_id' => Auth::id(),
+                'user_id' => $userId,
             ]);
 
             $reason->load(['asakaiChart.asakaiTitle', 'user']);

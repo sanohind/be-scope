@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\ApiController;
 use App\Models\AsakaiChart;
 use App\Models\AsakaiTitle;
 use App\Models\AsakaiTarget;
+use App\Services\ScopeUserSyncService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
@@ -251,7 +252,8 @@ class AsakaiChartController extends ApiController
                 ], 422);
             }
 
-            $userId = $this->getCurrentUserId($request);
+            // Ensure SSO/Sphere user exists in be_scope.users so FK (user_id) is valid
+            $userId = app(ScopeUserSyncService::class)->ensureScopeUser($request);
             if ($userId === null) {
                 return response()->json([
                     'success' => false,
