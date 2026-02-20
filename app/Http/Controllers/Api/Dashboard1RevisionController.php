@@ -2471,9 +2471,10 @@ class Dashboard1RevisionController extends ApiController
             $stockQuery->where('s.group_type_desc', $groupType);
         }
         
-        // Apply search filter if provided
+        // Apply search filter if provided (case-insensitive)
         if ($search) {
-            $stockQuery->where('s.partno', 'LIKE', "%{$search}%");
+            $searchUpper = strtoupper($search);
+            $stockQuery->whereRaw('UPPER(s.partno) LIKE ?', ["{$searchUpper}%"]);
         }
 
         // Get total count for pagination
@@ -2666,9 +2667,10 @@ class Dashboard1RevisionController extends ApiController
             $stockQuery->where('s.customer', $customer);
         }
         
-        // Apply search filter if provided
+        // Apply search filter if provided (case-insensitive)
         if ($search) {
-            $stockQuery->where('s.partno', 'LIKE', "%{$search}%");
+            $searchUpper = strtoupper($search);
+            $stockQuery->whereRaw('UPPER(s.partno) LIKE ?', ["{$searchUpper}%"]);
         }
 
         // Get total count for pagination
