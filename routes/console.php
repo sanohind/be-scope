@@ -17,11 +17,11 @@ Schedule::command('sync:erp-data')
     ->appendOutputTo(storage_path('logs/sync.log'));
 
 // Enable this for testing more frequent runs
-Schedule::command('sync:erp-data')
-    ->everyFiveMinutes()
-    ->withoutOverlapping()
-    ->runInBackground()
-    ->appendOutputTo(storage_path('logs/sync.log'));
+// Schedule::command('sync:erp-data')
+//     ->everyFiveMinutes()
+//     ->withoutOverlapping()
+//     ->runInBackground()
+//     ->appendOutputTo(storage_path('logs/sync.log'));
 
 // Run HR sync every hour (for production)
 Schedule::command('sync:hr-data')
