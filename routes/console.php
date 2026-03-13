@@ -9,9 +9,9 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 // Scheduler definitions (Laravel 11/12 style)
-// Production: hourly; Testing: every five minutes
+// Production: every six hours; Testing: every five minutes
 Schedule::command('sync:erp-data')
-    ->hourly()
+    ->everySixHours()
     ->withoutOverlapping()
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/sync.log'));
