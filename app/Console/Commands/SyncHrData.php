@@ -839,7 +839,7 @@ class SyncHrData extends Command
                         );
                         $allAttendances = array_merge($allAttendances, $dailyData);
                         $this->info("Fetched " . count($dailyData) . " status records for {$dateStr} (Total so far: " . count($allAttendances) . ")");
-                        usleep(1000000); // 1 second delay to completely prevent rate limiting
+                        usleep(2000000); // 2 seconds delay to completely prevent rate limiting
                     } catch (Exception $e) {
                         $this->warn("Failed to fetch attendance status for {$dateStr}: " . $e->getMessage());
                     }
@@ -870,7 +870,7 @@ class SyncHrData extends Command
                         );
                         $allAttendances = array_merge($allAttendances, $dailyData);
                         $this->info("Fetched " . count($dailyData) . " status records for {$dateStr} (Total so far: " . count($allAttendances) . ")");
-                        usleep(1000000); // 1 second delay
+                        usleep(2000000); // 2 seconds delay
                     } catch (Exception $e) {
                         $this->warn("Failed to fetch attendance status for {$dateStr}: " . $e->getMessage());
                     }
