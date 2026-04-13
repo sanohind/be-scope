@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Models\HrApiToken;
 use App\Models\AttendanceByPeriod;
+use App\Models\AttendanceByStatus;
 use App\Models\EmployeeMaster;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -1080,6 +1081,130 @@ class HrDashboardController extends ApiController
                 'trace' => $e->getTraceAsString()
             ]);
             return $this->sendError('Failed to get top departments overtime: ' . $e->getMessage(), [], 500);
+        }
+    }
+
+    /**
+     * Attendance By Status
+     * GET /api/dashboard/hr/attendance-by-status
+     *
+     * Returns total count per attendance status code filtered to the 13 allowed statuses:
+     * ABS, ANL, CHK, CIH, CLJ, CML, CUU, EMS, IPC, IZN, MPP, PRS, SDC
+     *
+     * Data source: Local database (attendance_by_status table, JSON column attendance_status)
+     *
+     * Query Parameters:
+     * - month: Month (1-12, default: current month)
+     * - year:  Year  (default: current year)
+     * - startDate: Start date (format: YYYY-MM-DD) – overrides month/year
+     * - endDate:   End date   (format: YYYY-MM-DD) – overrides month/year
+     */
+    public function attendanceByStatus(Request $request): JsonResponse
+    {
+        // The 13 status codes that should be shown
+        $allowedStatuses = ['ABS', 'ANL', 'CHK', 'CIH', 'CLJ', 'CML', 'CUU', 'EMS', 'IPC', 'IZN', 'MPP', 'PRS', 'SDC'];
+
+        try {
+            // --- Date range resolution -----------------------------------------
+            $startDate = $request->get('startDate');
+            $endDate   = $request->get('endDate');
+
+            if (!$startDate || !$endDate) {
+                $month = (int) $request->get('month', now()->month);
+                $year  = (int) $request->get('year',  now()->year);
+
+                if ($month < 1 || $month > 12) $month = now()->month;
+                if ($year  < 2000 || $year  > 2100) $year  = now()->year;
+
+                $startDate = Carbon::create($year, $month, 1)->startOfMonth()->format('Y-m-d');
+                $endDate   = Carbon::create($year, $month, 1)->endOfMonth()->format('Y-m-d');
+            }
+
+            $startDateObj = Carbon::createFromFormat('Y-m-d', $startDate);
+            $endDateObj   = Carbon::createFromFormat('Y-m-d', $endDate);
+
+            // --- Fetch rows from attendance_by_status --------------------------
+            $rows = DB::table('attendance_by_status')
+                ->whereBetween('period_start', [$startDate, $endDate])
+                ->get(['attendance_status', 'period_start', 'period_end', 'emp_no']);
+
+            // --- Aggregate totals across all matching rows ---------------------
+            $totals = array_fill_keys($allowedStatuses, 0);
+
+            // Daily breakdown:  date => [ status => count ]
+            $daily = [];
+
+            // Generate every date in range with zeroed status map
+            $cur = $startDateObj->copy();
+            while ($cur->lte($endDateObj)) {
+                $daily[$cur->format('Y-m-d')] = array_fill_keys($allowedStatuses, 0);
+                $cur->addDay();
+            }
+
+            foreach ($rows as $row) {
+                $statuses = json_decode($row->attendance_status ?? '{}', true);
+                if (!is_array($statuses)) continue;
+
+                // Determine which dates this record covers (period_start to period_end)
+                $pStart = Carbon::parse($row->period_start);
+                $pEnd   = $row->period_end ? Carbon::parse($row->period_end) : $pStart->copy();
+
+                foreach ($statuses as $code => $count) {
+                    $codeUpper = strtoupper($code);
+                    if (!in_array($codeUpper, $allowedStatuses)) continue;
+
+                    $totals[$codeUpper] += (int) $count;
+
+                    // Distribute the count evenly over the days in the period
+                    $numDays = max(1, (int) $pStart->diffInDays($pEnd) + 1);
+                    $perDay  = (int) $count; // The count is already per-period, assign to period_start day
+
+                    $dateKey = $pStart->format('Y-m-d');
+                    if (isset($daily[$dateKey])) {
+                        $daily[$dateKey][$codeUpper] += $perDay;
+                    }
+                }
+            }
+
+            // --- Build summary array (sorted by total desc) -------------------
+            $summaryData = [];
+            foreach ($allowedStatuses as $status) {
+                $summaryData[] = [
+                    'status' => $status,
+                    'total'  => $totals[$status],
+                ];
+            }
+
+            // Sort descending by total
+            usort($summaryData, fn($a, $b) => $b['total'] <=> $a['total']);
+
+            // --- Build daily array -------------------------------------------
+            $dailyData = [];
+            foreach ($daily as $date => $statusCounts) {
+                $dailyData[] = array_merge(['date' => $date], $statusCounts);
+            }
+
+            $grandTotal = array_sum($totals);
+
+            return $this->sendResponse([
+                'data'         => $summaryData,
+                'daily'        => $dailyData,
+                'total'        => $grandTotal,
+                'statuses'     => $allowedStatuses,
+                'filter_metadata' => [
+                    'start_date' => $startDate,
+                    'end_date'   => $endDate,
+                    'month'      => (int) $startDateObj->month,
+                    'year'       => (int) $startDateObj->year,
+                    'month_name' => $startDateObj->format('F'),
+                ],
+            ], 'Attendance by status retrieved successfully');
+
+        } catch (\Exception $e) {
+            Log::error('HR Attendance By Status Error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return $this->sendError('Failed to get attendance by status: ' . $e->getMessage(), [], 500);
         }
     }
 }

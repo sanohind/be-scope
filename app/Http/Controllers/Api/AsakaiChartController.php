@@ -135,7 +135,7 @@ class AsakaiChartController extends ApiController
                     return $date->format('Y-m-d');
                 }, $dateRange);
 
-                // Fill missing dates with qty = 0
+                // Fill missing dates with qty = null
                 $filledData = collect($allPeriods)->map(function ($periodValue) use ($chartsByDate, $asakaiTitleId) {
                     if ($chartsByDate->has($periodValue)) {
                         return $chartsByDate->get($periodValue);
@@ -146,7 +146,7 @@ class AsakaiChartController extends ApiController
                             'asakai_title' => null,
                             'category' => null,
                             'date' => $periodValue,
-                            'qty' => 0,
+                            'qty' => null,
                             'user' => null,
                             'user_id' => null,
                             'reasons_count' => 0,
@@ -239,19 +239,6 @@ class AsakaiChartController extends ApiController
                 ], 422);
             }
 
-            // Check if chart already exists for this title and date
-            $exists = AsakaiChart::where('asakai_title_id', $request->asakai_title_id)
-                ->where('date', $request->date)
-                ->exists();
-
-            if ($exists) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Chart data already exists for this title and date',
-                    'error' => 'Duplicate entry detected. Please use a different date or update the existing chart.'
-                ], 422);
-            }
-
             // Ensure SSO/Sphere user exists in be_scope.users so FK (user_id) is valid
             $userId = app(ScopeUserSyncService::class)->ensureScopeUser($request);
             if ($userId === null) {
@@ -262,18 +249,35 @@ class AsakaiChartController extends ApiController
                 ], 401);
             }
 
-            $chart = AsakaiChart::create([
-                'asakai_title_id' => $request->asakai_title_id,
-                'date' => $request->date,
-                'qty' => $request->qty,
-                'user_id' => $userId,
-            ]);
+            // Check if chart already exists for this title and date
+            $existingChart = AsakaiChart::where('asakai_title_id', $request->asakai_title_id)
+                ->where('date', $request->date)
+                ->first();
+
+            if ($existingChart) {
+                $existingChart->update([
+                    'qty' => $request->qty,
+                    'user_id' => $userId,
+                ]);
+                $chart = $existingChart;
+                $statusCode = 200;
+                $message = 'Chart data updated successfully';
+            } else {
+                $chart = AsakaiChart::create([
+                    'asakai_title_id' => $request->asakai_title_id,
+                    'date' => $request->date,
+                    'qty' => $request->qty,
+                    'user_id' => $userId,
+                ]);
+                $statusCode = 201;
+                $message = 'Chart data created successfully';
+            }
 
             $chart->load(['asakaiTitle', 'user']);
 
             return response()->json([
                 'success' => true,
-                'message' => 'Chart data created successfully',
+                'message' => $message,
                 'data' => [
                     'id' => $chart->id,
                     'asakai_title_id' => $chart->asakai_title_id,
@@ -285,7 +289,7 @@ class AsakaiChartController extends ApiController
                     'user_id' => $chart->user_id,
                     'created_at' => $chart->created_at->format('Y-m-d H:i:s'),
                 ]
-            ], 201);
+            ], $statusCode);
         } catch (\Illuminate\Database\QueryException $e) {
             return response()->json([
                 'success' => false,
@@ -324,6 +328,7 @@ class AsakaiChartController extends ApiController
                 'reasons' => $chart->reasons->map(function ($reason) {
                     return [
                         'id' => $reason->id,
+                        'asakai_chart_id' => $reason->asakai_chart_id,
                         'date' => $reason->date->format('Y-m-d'),
                         'part_no' => $reason->part_no,
                         'part_name' => $reason->part_name,
@@ -333,6 +338,9 @@ class AsakaiChartController extends ApiController
                         'line' => $reason->line,
                         'penyebab' => $reason->penyebab,
                         'perbaikan' => $reason->perbaikan,
+                        'image_urls' => $reason->image_path ? array_map(function ($path) {
+                            return \Illuminate\Support\Facades\Storage::disk('public')->url($path);
+                        }, $reason->image_path) : [],
                         'user' => optional($reason->user)->name,
                         'user_id' => $reason->user_id,
                         'created_at' => $reason->created_at->format('Y-m-d H:i:s'),
@@ -539,7 +547,7 @@ class AsakaiChartController extends ApiController
             // Generate all dates in range
             $allDates = $this->generateDateRange($dateFrom, $dateTo, $period);
 
-            // Fill missing dates with qty = 0
+            // Fill missing dates with qty = null
             $data = collect($allDates)->map(function ($date) use ($chartsByPeriod, $request, $period, $targets) {
                 $dateKey = $date->format('Y-m-d');
                 
@@ -611,7 +619,7 @@ class AsakaiChartController extends ApiController
                 } else {
                     return [
                         'date' => $dateKey,
-                        'qty' => 0,
+                        'qty' => null,
                         'target' => (float) $targetVal,
                         'has_data' => false,
                         'chart_id' => null,

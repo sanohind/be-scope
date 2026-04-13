@@ -9,6 +9,7 @@ use App\Services\ScopeUserSyncService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Storage;
 use Barryvdh\DomPDF\Facade\Pdf;
 
 class AsakaiReasonController extends ApiController
@@ -107,6 +108,9 @@ class AsakaiReasonController extends ApiController
                     'line' => $reason->line,
                     'penyebab' => $reason->penyebab,
                     'perbaikan' => $reason->perbaikan,
+                    'image_urls' => $reason->image_path ? array_map(function($path) {
+                        return Storage::disk('public')->url($path);
+                    }, $reason->image_path) : [],
                     'user' => $reason->user->name,
                     'user_id' => $reason->user_id,
                     'created_at' => $reason->created_at->format('Y-m-d H:i:s'),
@@ -150,6 +154,8 @@ class AsakaiReasonController extends ApiController
                 'line' => 'nullable|string',
                 'penyebab' => 'nullable|string',
                 'perbaikan' => 'nullable|string',
+                'images' => 'nullable|array|max:5',
+                'images.*' => 'image|mimes:jpeg,png,jpg,gif,svg,webp|max:5120',
             ]);
 
             if ($validator->fails()) {
@@ -171,18 +177,7 @@ class AsakaiReasonController extends ApiController
                 ], 422);
             }
 
-            // Check if reason already exists for this chart
-            $exists = AsakaiReason::where('asakai_chart_id', $request->asakai_chart_id)
-                ->where('date', $request->date)
-                ->exists();
 
-            if ($exists) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Reason already exists for this chart and date',
-                    'error' => 'Duplicate entry detected. A reason for this chart and date already exists.'
-                ], 422);
-            }
 
             // Ensure SSO/Sphere user exists in be_scope.users so FK (user_id) is valid
             $userId = app(ScopeUserSyncService::class)->ensureScopeUser($request);
@@ -192,6 +187,13 @@ class AsakaiReasonController extends ApiController
                     'message' => 'Unauthenticated',
                     'error' => 'User could not be determined. Please ensure you are logged in with OIDC/SSO.'
                 ], 401);
+            }
+
+            $imagePaths = [];
+            if ($request->hasFile('images')) {
+                foreach ($request->file('images') as $image) {
+                    $imagePaths[] = $image->store('asakai_reasons/images', 'public');
+                }
             }
 
             $reason = AsakaiReason::create([
@@ -205,6 +207,7 @@ class AsakaiReasonController extends ApiController
                 'line' => $request->line,
                 'penyebab' => $request->penyebab,
                 'perbaikan' => $request->perbaikan,
+                'image_path' => count($imagePaths) > 0 ? $imagePaths : null,
                 'user_id' => $userId,
             ]);
 
@@ -227,6 +230,9 @@ class AsakaiReasonController extends ApiController
                     'line' => $reason->line,
                     'penyebab' => $reason->penyebab,
                     'perbaikan' => $reason->perbaikan,
+                    'image_urls' => $reason->image_path ? array_map(function($path) {
+                        return Storage::disk('public')->url($path);
+                    }, $reason->image_path) : [],
                     'user' => $reason->user->name,
                     'user_id' => $reason->user_id,
                     'created_at' => $reason->created_at->format('Y-m-d H:i:s'),
@@ -277,6 +283,9 @@ class AsakaiReasonController extends ApiController
                 'line' => $reason->line,
                 'penyebab' => $reason->penyebab,
                 'perbaikan' => $reason->perbaikan,
+                'image_urls' => $reason->image_path ? array_map(function($path) {
+                    return Storage::disk('public')->url($path);
+                }, $reason->image_path) : [],
                 'user' => $reason->user->name,
                 'user_id' => $reason->user_id,
                 'created_at' => $reason->created_at->format('Y-m-d H:i:s'),
@@ -311,7 +320,6 @@ class AsakaiReasonController extends ApiController
             $reason = AsakaiReason::findOrFail($id);
 
             $validator = Validator::make($request->all(), [
-                'asakai_chart_id' => 'sometimes|required|exists:asakai_charts,id',
                 'date' => 'sometimes|required|date',
                 'part_no' => 'nullable|string',
                 'part_name' => 'nullable|string',
@@ -321,6 +329,11 @@ class AsakaiReasonController extends ApiController
                 'line' => 'nullable|string',
                 'penyebab' => 'nullable|string',
                 'perbaikan' => 'nullable|string',
+                'images' => 'nullable|array|max:5',
+                'images.*' => 'image|mimes:jpeg,png,jpg,gif,svg,webp|max:5120',
+                'kept_image_urls' => 'nullable|array',
+                'kept_image_urls.*' => 'string',
+                'image_edits' => 'nullable|boolean',
             ]);
 
             if ($validator->fails()) {
@@ -345,25 +358,43 @@ class AsakaiReasonController extends ApiController
                     ], 422);
                 }
 
-                // Check if updating would create duplicate
-                $exists = AsakaiReason::where('asakai_chart_id', $chartId)
-                    ->where('date', $date)
-                    ->where('id', '!=', $id)
-                    ->exists();
 
-                if ($exists) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Reason already exists for this chart and date',
-                        'error' => 'Duplicate entry detected. Another reason with the same chart and date already exists.'
-                    ], 422);
-                }
             }
 
             $reason->update($request->only([
                 'asakai_chart_id', 'date', 'part_no', 'part_name', 
                 'problem', 'qty', 'section', 'line', 'penyebab', 'perbaikan'
             ]));
+
+            // Handle existing images filtering if image_edits flag is set
+            if ($request->has('image_edits')) {
+                $existingPaths = $reason->image_path ?? [];
+                $keptUrls = $request->input('kept_image_urls', []);
+                $keptPaths = [];
+
+                foreach ($existingPaths as $path) {
+                    $url = Storage::disk('public')->url($path);
+                    if (in_array($url, $keptUrls)) {
+                        $keptPaths[] = $path;
+                    } else {
+                        Storage::disk('public')->delete($path);
+                    }
+                }
+                $reason->image_path = $keptPaths;
+            }
+
+            // Append new images
+            if ($request->hasFile('images')) {
+                $imagePaths = $reason->image_path ?? [];
+                if (!is_array($imagePaths)) $imagePaths = [];
+                
+                foreach ($request->file('images') as $image) {
+                    $imagePaths[] = $image->store('asakai_reasons/images', 'public');
+                }
+                $reason->image_path = $imagePaths;
+            }
+            
+            $reason->save();
 
             $reason->load(['asakaiChart.asakaiTitle', 'user']);
 
@@ -384,6 +415,9 @@ class AsakaiReasonController extends ApiController
                     'line' => $reason->line,
                     'penyebab' => $reason->penyebab,
                     'perbaikan' => $reason->perbaikan,
+                    'image_urls' => $reason->image_path ? array_map(function($path) {
+                        return Storage::disk('public')->url($path);
+                    }, $reason->image_path) : [],
                     'user' => $reason->user->name,
                     'user_id' => $reason->user_id,
                     'updated_at' => $reason->updated_at->format('Y-m-d H:i:s'),
@@ -419,6 +453,11 @@ class AsakaiReasonController extends ApiController
     {
         try {
             $reason = AsakaiReason::findOrFail($id);
+            if ($reason->image_path) {
+                foreach ($reason->image_path as $path) {
+                    Storage::disk('public')->delete($path);
+                }
+            }
             $reason->delete();
 
             return response()->json([
@@ -473,6 +512,9 @@ class AsakaiReasonController extends ApiController
                     'line' => $reason->line,
                     'penyebab' => $reason->penyebab,
                     'perbaikan' => $reason->perbaikan,
+                    'image_urls' => $reason->image_path ? array_map(function($path) {
+                        return Storage::disk('public')->url($path);
+                    }, $reason->image_path) : [],
                     'user' => $reason->user->name,
                     'user_id' => $reason->user_id,
                     'created_at' => $reason->created_at->format('Y-m-d H:i:s'),

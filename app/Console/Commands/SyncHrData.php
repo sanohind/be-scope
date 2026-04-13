@@ -10,6 +10,7 @@ use App\Models\SyncLog;
 use App\Models\HrApiToken;
 use App\Models\EmployeeMaster;
 use App\Models\AttendanceByPeriod;
+use App\Models\AttendanceByStatus;
 use Carbon\Carbon;
 use Exception;
 
@@ -95,6 +96,13 @@ class SyncHrData extends Command
             // Sync AttendanceByPeriod
             $this->info('Syncing AttendanceByPeriod...');
             $result = $this->syncAttendanceByPeriod();
+            $totalRecords += $result['total'];
+            $successRecords += $result['success'];
+            $failedRecords += $result['failed'];
+
+            // Sync AttendanceByStatus
+            $this->info('Syncing AttendanceByStatus...');
+            $result = $this->syncAttendanceByStatus();
             $totalRecords += $result['total'];
             $successRecords += $result['success'];
             $failedRecords += $result['failed'];
@@ -779,6 +787,168 @@ class SyncHrData extends Command
 
         } catch (Exception $e) {
             $this->error("Error syncing AttendanceByPeriod: " . $e->getMessage());
+            return ['total' => 0, 'success' => 0, 'failed' => 0];
+        }
+    }
+
+    /**
+     * Sync AttendanceByStatus from HR API
+     *
+     * The /attendances/status endpoint returns SUMMARY data per employee per period.
+     * Response fields: empNo, empFirstName, empMiddleName, empLastName, birthDate,
+     *   positionName, department, empStartDate, empEndDate, costCode, spvName,
+     *   empStatus, contractedWorkHours, gender, periodStart, periodEnd,
+     *   attendanceStatus (object: { "PRS": 2, "OFF": 3, ... })
+     *
+     * Unique key: emp_no + period_start
+     */
+    private function syncAttendanceByStatus()
+    {
+        try {
+            $success = 0;
+            $failed = 0;
+            $updated = 0;
+            $inserted = 0;
+            $skipped = 0;
+            $total = 0;
+
+            // Unique key is composite: emp_no + period_start
+            $uniqueKeys = ['emp_no', 'period_start'];
+
+            if (!$this->isInitialization && $this->dateFrom && $this->dateTo) {
+                $this->info("Fetching attendance status data from HR API daily (startDate: {$this->dateFrom->format('Y-m-d')}, endDate: {$this->dateTo->format('Y-m-d')})...");
+                $allAttendances = [];
+                $tempDate = $this->dateFrom->copy();
+                
+                $totalDays = $this->dateFrom->diffInDays($this->dateTo) + 1;
+                $dayCount = 0;
+
+                while ($tempDate->lte($this->dateTo)) {
+                    $dayCount++;
+                    $dateStr = $tempDate->format('Y-m-d');
+                    $this->info("Fetching attendance status for {$dateStr} ({$dayCount} of {$totalDays})...");
+                    
+                    try {
+                        $dailyData = $this->fetchAllDataFromApi(
+                            '/attendances/status',
+                            [
+                                'startDate' => $dateStr,
+                                'endDate'   => $dateStr,
+                            ],
+                            'get'
+                        );
+                        $allAttendances = array_merge($allAttendances, $dailyData);
+                        $this->info("Fetched " . count($dailyData) . " status records for {$dateStr} (Total so far: " . count($allAttendances) . ")");
+                        usleep(1000000); // 1 second delay to completely prevent rate limiting
+                    } catch (Exception $e) {
+                        $this->warn("Failed to fetch attendance status for {$dateStr}: " . $e->getMessage());
+                    }
+                    $tempDate->addDay();
+                }
+            } else {
+                $this->info("Initialization sync: Fetching attendance status data day by day...");
+                $currentDate = Carbon::now();
+                $startDate = Carbon::create(2024, 11, 1);
+                $totalDays = $startDate->diffInDays($currentDate) + 1;
+                $allAttendances = [];
+                $dayCount = 0;
+                $tempDate = $startDate->copy();
+
+                while ($tempDate->lte($currentDate)) {
+                    $dayCount++;
+                    $dateStr = $tempDate->format('Y-m-d');
+                    $this->info("Fetching attendance status for {$dateStr} ({$dayCount} of {$totalDays})...");
+
+                    try {
+                        $dailyData = $this->fetchAllDataFromApi(
+                            '/attendances/status',
+                            [
+                                'startDate' => $dateStr,
+                                'endDate'   => $dateStr,
+                            ],
+                            'get'
+                        );
+                        $allAttendances = array_merge($allAttendances, $dailyData);
+                        $this->info("Fetched " . count($dailyData) . " status records for {$dateStr} (Total so far: " . count($allAttendances) . ")");
+                        usleep(1000000); // 1 second delay
+                    } catch (Exception $e) {
+                        $this->warn("Failed to fetch attendance status for {$dateStr}: " . $e->getMessage());
+                    }
+                    $tempDate->addDay();
+                }
+            }
+
+            $this->info('Processing ' . count($allAttendances) . ' attendance status records...');
+
+            $chunkSize = 500;
+            $chunks = array_chunk($allAttendances, $chunkSize);
+
+
+            foreach ($chunks as $chunkIndex => $chunk) {
+                foreach ($chunk as $attendance) {
+                    try {
+                        $empNo       = $attendance['empNo'] ?? null;
+                        $periodStart = $this->convertDate($attendance['periodStart'] ?? null);
+
+                        // Guard: emp_no and period_start are required unique keys
+                        if (empty($empNo) || empty($periodStart)) {
+                            $this->warn("Skipping attendance status record: empNo or periodStart is missing");
+                            continue;
+                        }
+
+                        $data = [
+                            'emp_no'                => $empNo,
+                            'period_start'          => $periodStart,
+                            'period_end'            => $this->convertDate($attendance['periodEnd'] ?? null),
+                            'emp_first_name'        => $attendance['empFirstName'] ?? null,
+                            'emp_middle_name'       => $attendance['empMiddleName'] ?? null,
+                            'emp_last_name'         => $attendance['empLastName'] ?? null,
+                            'birth_date'            => $this->convertDate($attendance['birthDate'] ?? null),
+                            'position_name'         => $attendance['positionName'] ?? null,
+                            'department'            => $attendance['department'] ?? null,
+                            'emp_start_date'        => $this->convertDate($attendance['empStartDate'] ?? null),
+                            'emp_end_date'          => $this->convertDate($attendance['empEndDate'] ?? null),
+                            'cost_code'             => $attendance['costCode'] ?? null,
+                            'spv_name'              => $attendance['spvName'] ?? null,
+                            'emp_status'            => $attendance['empStatus'] ?? null,
+                            'contracted_work_hours' => $attendance['contractedWorkHours'] ?? null,
+                            'gender'                => $attendance['gender'] ?? null,
+                            'attendance_status'     => json_encode($attendance['attendanceStatus'] ?? []),
+                            'raw_data'              => json_encode($attendance),
+                        ];
+
+                        $result = $this->upsertRecord('attendance_by_status', $data, $uniqueKeys);
+
+                        if ($result['action'] === 'updated') {
+                            $updated++;
+                        } elseif ($result['action'] === 'inserted') {
+                            $inserted++;
+                        } else {
+                            $skipped++;
+                        }
+
+                        $success++;
+                        $total++;
+                    } catch (Exception $e) {
+                        $failed++;
+                        $total++;
+                        $empNo = $attendance['empNo'] ?? 'UNKNOWN';
+                        $this->warn("Failed to sync AttendanceByStatus record (empNo: {$empNo}): " . $e->getMessage());
+                    }
+                }
+
+                if ($total % 1000 == 0) {
+                    $this->info("Processed " . number_format($total) . " AttendanceByStatus records... (Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped})");
+                }
+
+                gc_collect_cycles();
+            }
+
+            $this->info("AttendanceByStatus sync completed: Total: {$total}, Inserted: {$inserted}, Updated: {$updated}, Skipped: {$skipped}, Failed: {$failed}");
+            return ['total' => $total, 'success' => $success, 'failed' => $failed];
+
+        } catch (Exception $e) {
+            $this->error("Error syncing AttendanceByStatus: " . $e->getMessage());
             return ['total' => 0, 'success' => 0, 'failed' => 0];
         }
     }

@@ -374,6 +374,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/top-employees-overtime', [HrDashboardController::class, 'topEmployeesOvertime']);
         Route::get('/top-departments-overtime', [HrDashboardController::class, 'topDepartmentsOvertime']);
         Route::get('/overtime-per-day', [HrDashboardController::class, 'overtimePerDay']);
+        Route::get('/attendance-by-status', [HrDashboardController::class, 'attendanceByStatus']);
         Route::get('/debug', [HrDashboardController::class, 'debug']);
     });
 
@@ -422,6 +423,7 @@ Route::prefix('asakai')->group(function () {
     Route::post('/reasons', [AsakaiReasonController::class, 'store'])->middleware(['jwt.auth', 'role:admin,superadmin']);
     Route::get('/reasons/{id}', [AsakaiReasonController::class, 'show']);
     Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth', 'role:admin,superadmin']);
+    Route::post('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth', 'role:admin,superadmin']); // POST alias for file upload support
     Route::delete('/reasons/{id}', [AsakaiReasonController::class, 'destroy'])->middleware(['jwt.auth', 'role:admin,superadmin']);
     Route::get('/charts/{chartId}/reasons', [AsakaiReasonController::class, 'getByChart']);
 });

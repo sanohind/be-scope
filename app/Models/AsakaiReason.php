@@ -20,11 +20,13 @@ class AsakaiReason extends Model
         'line',
         'penyebab',
         'perbaikan',
+        'image_path',
         'user_id',
     ];
 
     protected $casts = [
         'date' => 'date',
+        'image_path' => 'array',
     ];
 
     /**
