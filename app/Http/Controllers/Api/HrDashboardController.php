@@ -1051,8 +1051,15 @@ class HrDashboardController extends ApiController
             // Format response: convert minutes to hours
             $data = $topDepartments->map(function ($department, $index) {
                 $totalMinutes = (float)$department->total_overtime_minutes;
+                $totalEmployees = (int)$department->total_employees;
+                
                 $hours = intdiv((int)$totalMinutes, 60);
                 $minutes = (int)$totalMinutes % 60;
+
+                // Calculate average overtime
+                $averageMinutes = $totalEmployees > 0 ? $totalMinutes / $totalEmployees : 0;
+                $avgHours = intdiv((int)$averageMinutes, 60);
+                $avgMins = (int)$averageMinutes % 60;
 
                 return [
                     'rank' => $index + 1,
@@ -1061,7 +1068,9 @@ class HrDashboardController extends ApiController
                     'total_overtime_index' => $hours,
                     'total_overtime_index_minutes' => $minutes,
                     'total_overtime_index_formatted' => $hours . ' jam ' . ($minutes > 0 ? $minutes . ' menit' : ''),
-                    'total_employees' => (int)$department->total_employees,
+                    'total_employees' => $totalEmployees,
+                    'average_overtime_minutes' => round($averageMinutes, 2),
+                    'average_overtime_formatted' => $avgHours . ' jam ' . ($avgMins > 0 ? $avgMins . ' menit' : ''),
                 ];
             });
 
