@@ -107,8 +107,8 @@ class AsakaiChartController extends ApiController
             // Get existing chart data
             $charts = $query->orderBy('created_at', 'desc')->get();
 
-            // Transform existing data and key by date
-            $chartsByDate = $charts->map(function ($chart) {
+            // Transform existing data
+            $mappedCharts = $charts->map(function ($chart) {
                 return [
                     'id' => $chart->id,
                     'asakai_title_id' => $chart->asakai_title_id,
@@ -122,10 +122,12 @@ class AsakaiChartController extends ApiController
                     'created_at' => $chart->created_at->format('Y-m-d H:i:s'),
                     'has_data' => true,
                 ];
-            })->keyBy('date');
+            });
 
             // If asakai_title_id is provided and we have date range, fill missing dates
             if ($asakaiTitleId && $dateFrom && $dateTo) {
+                $chartsByDate = $mappedCharts->keyBy('date');
+
                 // Generate all periods in range
                 $carbonDateFrom = Carbon::parse($dateFrom);
                 $carbonDateTo = Carbon::parse($dateTo);
@@ -188,10 +190,10 @@ class AsakaiChartController extends ApiController
                 // If no asakai_title_id or date range, return original paginated data
                 $perPage = $request->get('per_page', 10);
                 $currentPage = $request->get('page', 1);
-                $total = $chartsByDate->count();
+                $total = $mappedCharts->count();
                 $lastPage = (int) ceil($total / $perPage);
                 
-                $paginatedData = $chartsByDate->forPage($currentPage, $perPage);
+                $paginatedData = $mappedCharts->forPage($currentPage, $perPage);
 
                 return response()->json([
                     'success' => true,
