@@ -30,12 +30,59 @@ class VerifySphereToken
             ], 401);
         }
 
+        // Attempt OIDC remote token validation first
+        $sphereUrl = env('SPHERE_API_URL');
+        $userData = null;
+        
+        if ($sphereUrl) {
+            try {
+                $apiResponse = \Illuminate\Support\Facades\Http::withHeaders([
+                    'Authorization' => 'Bearer ' . $token,
+                    'Accept' => 'application/json',
+                ])->timeout(5)->get($sphereUrl . '/api/oauth/verify-token');
+
+                if ($apiResponse->successful()) {
+                    $data = $apiResponse->json();
+                    $userData = $data['data']['user'] ?? null;
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning('SCOPE: OIDC Remote verification failed: ' . $e->getMessage());
+            }
+        }
+
+        if ($userData) {
+            // Handle role which could be an array or string
+            $roleData = $userData['role'] ?? null;
+            $roleSlug = is_array($roleData) ? ($roleData['slug'] ?? null) : $roleData;
+            $roleLevel = is_array($roleData) ? ($roleData['level'] ?? null) : ($userData['role_level'] ?? null);
+
+            // Handle department which could be an array or string
+            $deptData = $userData['department'] ?? null;
+            $deptId = is_array($deptData) ? ($deptData['id'] ?? null) : ($userData['department_id'] ?? null);
+            $deptCode = is_array($deptData) ? ($deptData['code'] ?? null) : ($userData['department_code'] ?? null);
+            $deptName = is_array($deptData) ? ($deptData['name'] ?? null) : ($userData['department_name'] ?? null);
+
+            $request->attributes->set('sphere_user', [
+                'id' => $userData['id'] ?? $userData['sub'] ?? null,
+                'email' => $userData['email'] ?? null,
+                'username' => $userData['username'] ?? ($userData['preferred_username'] ?? null),
+                'name' => $userData['name'] ?? null,
+                'role' => $roleSlug,
+                'role_level' => $roleLevel,
+                'department_id' => $deptId,
+                'department_code' => $deptCode,
+                'department_name' => $deptName,
+            ]);
+
+            return $next($request);
+        }
+
         try {
             // Get JWT secret from Sphere (HS256 symmetric key)
             $jwtSecret = env('SPHERE_JWT_SECRET');
             
             if (!$jwtSecret) {
-                \Log::error('Sphere JWT secret not configured');
+                \Illuminate\Support\Facades\Log::error('Sphere JWT secret not configured');
                 return response()->json([
                     'success' => false,
                     'message' => 'Server configuration error'
@@ -47,7 +94,7 @@ class VerifySphereToken
             
             // Attach user info to request
             $request->attributes->set('sphere_user', [
-                'id' => $decoded->sub ?? null,
+                'id' => $decoded->sub ?? $decoded->id ?? null,
                 'email' => $decoded->email ?? null,
                 'username' => $decoded->username ?? null,
                 'name' => $decoded->name ?? null,
