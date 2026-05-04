@@ -143,7 +143,7 @@ Route::get('/test-sphere-connection', function () {
 Route::get('/stock/daily', [DailyStockController::class, 'index']);
 
 // Daily Use WH API Routes
-Route::prefix('daily-use-wh')->middleware(['jwt.auth'])->group(function () {
+Route::prefix('daily-use-wh')->middleware(['jwt.auth', 'feature:planning-manage'])->group(function () {
     Route::post('/min-max', [DailyUseWhController::class, 'storeMinMax']);
     Route::get('/min-max', [DailyUseWhController::class, 'getMinMax']);
     Route::delete('/min-max/{id}', [DailyUseWhController::class, 'destroyMinMax']);
@@ -157,7 +157,7 @@ Route::prefix('daily-use-wh')->middleware(['jwt.auth'])->group(function () {
 });
 
 // Production Plan API Routes
-Route::prefix('production-plan')->middleware(['jwt.auth'])->group(function () {
+Route::prefix('production-plan')->middleware(['jwt.auth', 'feature:planning-manage'])->group(function () {
     Route::post('/import', [ProductionPlanController::class, 'import']);
     Route::post('/store', [ProductionPlanController::class, 'store']);
     Route::get('/', [ProductionPlanController::class, 'index']);
@@ -168,7 +168,7 @@ Route::prefix('production-plan')->middleware(['jwt.auth'])->group(function () {
 });
 
 // Wh Delivery Plan API Routes
-Route::prefix('wh-delivery-plan')->middleware(['jwt.auth'])->group(function () {
+Route::prefix('wh-delivery-plan')->middleware(['jwt.auth', 'feature:planning-manage'])->group(function () {
     Route::post('/import', [WhDeliveryPlanController::class, 'import']);
     Route::post('/store', [WhDeliveryPlanController::class, 'store']);
     Route::get('/', [WhDeliveryPlanController::class, 'index']);

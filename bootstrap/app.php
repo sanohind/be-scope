@@ -17,6 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'sanctum.api' => \App\Http\Middleware\SanctumApiAuth::class,
             'sphere.token' => \App\Http\Middleware\VerifySphereToken::class, // SSO
             'role' => \App\Http\Middleware\RoleMiddleware::class,
+            'feature' => \App\Http\Middleware\FeatureMiddleware::class,
         ]);
         
         // Add custom CORS middleware for API routes
