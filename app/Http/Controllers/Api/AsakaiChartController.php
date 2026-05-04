@@ -131,8 +131,8 @@ class AsakaiChartController extends ApiController
                 // Generate all periods in range
                 $carbonDateFrom = Carbon::parse($dateFrom);
                 $carbonDateTo = Carbon::parse($dateTo);
-                
-                $dateRange = $this->generateDateRange($carbonDateFrom, $carbonDateTo, $period);
+                // Always generate daily periods for the data table so we don't skip days
+                $dateRange = $this->generateDateRange($carbonDateFrom, $carbonDateTo, 'daily');
                 $allPeriods = array_map(function($date) {
                     return $date->format('Y-m-d');
                 }, $dateRange);
