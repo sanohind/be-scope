@@ -82,6 +82,32 @@ class ScopeUserSyncService
             return $id;
         }
 
+        // If ID doesn't exist, check if the username already exists locally
+        $existsByUsername = User::where('username', $username)->first();
+        if ($existsByUsername) {
+            $existsByUsername->update([
+                'name' => $name,
+                'email' => $email ?? $existsByUsername->email,
+                'role' => $role,
+                'is_active' => true,
+            ]);
+            return $existsByUsername->id;
+        }
+
+        // Also check by email if provided
+        if ($email) {
+            $existsByEmail = User::where('email', $email)->first();
+            if ($existsByEmail) {
+                $existsByEmail->update([
+                    'name' => $name,
+                    'username' => $username,
+                    'role' => $role,
+                    'is_active' => true,
+                ]);
+                return $existsByEmail->id;
+            }
+        }
+
         // Insert with explicit id (FK from Sphere SSO)
         DB::table('users')->insert([
             'id' => $id,
