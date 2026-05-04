@@ -137,16 +137,21 @@ class AsakaiChartController extends ApiController
                     return $date->format('Y-m-d');
                 }, $dateRange);
 
+                // Get the actual title data to populate placeholder rows
+                $titleModel = \App\Models\AsakaiTitle::find($asakaiTitleId);
+                $titleName = $titleModel ? $titleModel->title : null;
+                $titleCategory = $titleModel ? $titleModel->category : null;
+
                 // Fill missing dates with qty = null
-                $filledData = collect($allPeriods)->map(function ($periodValue) use ($chartsByDate, $asakaiTitleId) {
+                $filledData = collect($allPeriods)->map(function ($periodValue) use ($chartsByDate, $asakaiTitleId, $titleName, $titleCategory) {
                     if ($chartsByDate->has($periodValue)) {
                         return $chartsByDate->get($periodValue);
                     } else {
                         return [
                             'id' => null,
                             'asakai_title_id' => (int) $asakaiTitleId,
-                            'asakai_title' => null,
-                            'category' => null,
+                            'asakai_title' => $titleName,
+                            'category' => $titleCategory,
                             'date' => $periodValue,
                             'qty' => null,
                             'user' => null,
