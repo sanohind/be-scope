@@ -411,11 +411,11 @@ Route::prefix('asakai')->group(function () {
 
     // Target Routes
     Route::get('/charts/target', [AsakaiChartController::class, 'getTarget']);
-    Route::post('/charts/target', [AsakaiChartController::class, 'storeTarget'])->middleware(['jwt.auth', 'role:superadmin']);
-    Route::delete('/charts/target/{id}', [AsakaiChartController::class, 'destroyTarget'])->middleware(['jwt.auth', 'role:superadmin']);
+    Route::post('/charts/target', [AsakaiChartController::class, 'storeTarget'])->middleware(['jwt.auth', 'feature:asakai-content']);
+    Route::delete('/charts/target/{id}', [AsakaiChartController::class, 'destroyTarget'])->middleware(['jwt.auth', 'feature:asakai-content']);
     Route::get('/charts/{id}', [AsakaiChartController::class, 'show']);
-    Route::put('/charts/{id}', [AsakaiChartController::class, 'update'])->middleware(['jwt.auth', 'role:superadmin']);
-    Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy'])->middleware(['jwt.auth', 'role:superadmin']);
+    Route::put('/charts/{id}', [AsakaiChartController::class, 'update'])->middleware(['jwt.auth', 'feature:asakai-content']);
+    Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy'])->middleware(['jwt.auth', 'feature:asakai-content']);
 
     // Asakai Reasons
     Route::get('/reasons', [AsakaiReasonController::class, 'index']);
@@ -424,7 +424,7 @@ Route::prefix('asakai')->group(function () {
     Route::get('/reasons/{id}', [AsakaiReasonController::class, 'show']);
     Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth']);
     Route::post('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth']); // POST alias for file upload support
-    Route::delete('/reasons/{id}', [AsakaiReasonController::class, 'destroy'])->middleware(['jwt.auth', 'role:superadmin']);
+    Route::delete('/reasons/{id}', [AsakaiReasonController::class, 'destroy'])->middleware(['jwt.auth', 'feature:asakai-content']);
     Route::get('/charts/{chartId}/reasons', [AsakaiReasonController::class, 'getByChart']);
 });
 
