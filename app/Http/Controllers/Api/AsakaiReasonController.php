@@ -155,7 +155,11 @@ class AsakaiReasonController extends ApiController
                 'penyebab' => 'nullable|string',
                 'perbaikan' => 'nullable|string',
                 'images' => 'nullable|array|max:5',
-                'images.*' => 'image|mimes:jpeg,png,jpg,gif,svg,webp|max:5120',
+                'images.*' => 'file|mimes:jpeg,png,jpg,gif,svg,webp,pdf|max:2048',
+            ], [
+                'images.*.max' => 'File size must not be larger than 2MB.',
+                'images.*.mimes' => 'File format must be one of: jpeg, png, jpg, gif, svg, webp, pdf.',
+                'images.*.uploaded' => 'File failed to upload (possibly exceeds server max file size limit of 2MB).',
             ]);
 
             if ($validator->fails()) {
@@ -330,10 +334,14 @@ class AsakaiReasonController extends ApiController
                 'penyebab' => 'nullable|string',
                 'perbaikan' => 'nullable|string',
                 'images' => 'nullable|array|max:5',
-                'images.*' => 'image|mimes:jpeg,png,jpg,gif,svg,webp|max:5120',
+                'images.*' => 'file|mimes:jpeg,png,jpg,gif,svg,webp,pdf|max:2048',
                 'kept_image_urls' => 'nullable|array',
                 'kept_image_urls.*' => 'string',
                 'image_edits' => 'nullable|boolean',
+            ], [
+                'images.*.max' => 'File size must not be larger than 2MB.',
+                'images.*.mimes' => 'File format must be one of: jpeg, png, jpg, gif, svg, webp, pdf.',
+                'images.*.uploaded' => 'File failed to upload (possibly exceeds server max file size limit of 2MB).',
             ]);
 
             if ($validator->fails()) {

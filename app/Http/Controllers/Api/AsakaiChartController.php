@@ -104,11 +104,11 @@ class AsakaiChartController extends ApiController
                 $query->whereDate('date', $request->date);
             }
 
-            // Get existing chart data
-            $charts = $query->orderBy('created_at', 'desc')->get();
+            $perPage = $request->get('per_page', 10);
+            $paginator = $query->orderBy('date', 'desc')->paginate($perPage);
 
             // Transform existing data
-            $mappedCharts = $charts->map(function ($chart) {
+            $mappedCharts = $paginator->getCollection()->map(function ($chart) {
                 return [
                     'id' => $chart->id,
                     'asakai_title_id' => $chart->asakai_title_id,
@@ -124,99 +124,23 @@ class AsakaiChartController extends ApiController
                 ];
             });
 
-            // If asakai_title_id is provided and we have date range, fill missing dates
-            if ($asakaiTitleId && $dateFrom && $dateTo) {
-                $chartsByDate = $mappedCharts->keyBy('date');
-
-                // Generate all periods in range
-                $carbonDateFrom = Carbon::parse($dateFrom);
-                $carbonDateTo = Carbon::parse($dateTo);
-                // Always generate daily periods for the data table so we don't skip days
-                $dateRange = $this->generateDateRange($carbonDateFrom, $carbonDateTo, 'daily');
-                $allPeriods = array_map(function($date) {
-                    return $date->format('Y-m-d');
-                }, $dateRange);
-
-                // Get the actual title data to populate placeholder rows
-                $titleModel = \App\Models\AsakaiTitle::find($asakaiTitleId);
-                $titleName = $titleModel ? $titleModel->title : null;
-                $titleCategory = $titleModel ? $titleModel->category : null;
-
-                // Fill missing dates with qty = null
-                $filledData = collect($allPeriods)->map(function ($periodValue) use ($chartsByDate, $asakaiTitleId, $titleName, $titleCategory) {
-                    if ($chartsByDate->has($periodValue)) {
-                        return $chartsByDate->get($periodValue);
-                    } else {
-                        return [
-                            'id' => null,
-                            'asakai_title_id' => (int) $asakaiTitleId,
-                            'asakai_title' => $titleName,
-                            'category' => $titleCategory,
-                            'date' => $periodValue,
-                            'qty' => null,
-                            'user' => null,
-                            'user_id' => null,
-                            'reasons_count' => 0,
-                            'created_at' => null,
-                            'has_data' => false,
-                        ];
-                    }
-                })->values();
-
-                // Pagination for filled data
-                $perPage = $request->get('per_page', 10);
-                $currentPage = $request->get('page', 1);
-                $total = $filledData->count();
-                $lastPage = (int) ceil($total / $perPage);
-                
-                $paginatedData = $filledData->forPage($currentPage, $perPage);
-
-                return response()->json([
-                    'success' => true,
-                    'data' => $paginatedData->values(),
-                    'pagination' => [
-                        'current_page' => (int) $currentPage,
-                        'total' => $total,
-                        'per_page' => (int) $perPage,
-                        'last_page' => $lastPage,
-                    ],
-                    'filter_metadata' => [
-                        'period' => $period,
-                        'date_field' => 'date',
-                        'date_from' => $dateFrom,
-                        'date_to' => $dateTo,
-                        'asakai_title_id' => (int) $asakaiTitleId,
-                        'total_dates' => $total,
-                        'dates_with_data' => $chartsByDate->count(),
-                        'dates_without_data' => $total - $chartsByDate->count(),
-                    ],
-                ], 200);
-            } else {
-                // If no asakai_title_id or date range, return original paginated data
-                $perPage = $request->get('per_page', 10);
-                $currentPage = $request->get('page', 1);
-                $total = $mappedCharts->count();
-                $lastPage = (int) ceil($total / $perPage);
-                
-                $paginatedData = $mappedCharts->forPage($currentPage, $perPage);
-
-                return response()->json([
-                    'success' => true,
-                    'data' => $paginatedData->values(),
-                    'pagination' => [
-                        'current_page' => (int) $currentPage,
-                        'total' => $total,
-                        'per_page' => (int) $perPage,
-                        'last_page' => $lastPage,
-                    ],
-                    'filter_metadata' => [
-                        'period' => $period,
-                        'date_field' => 'date',
-                        'date_from' => $dateFrom,
-                        'date_to' => $dateTo,
-                    ],
-                ], 200);
-            }
+            return response()->json([
+                'success' => true,
+                'data' => $mappedCharts,
+                'pagination' => [
+                    'current_page' => $paginator->currentPage(),
+                    'total' => $paginator->total(),
+                    'per_page' => $paginator->perPage(),
+                    'last_page' => $paginator->lastPage(),
+                ],
+                'filter_metadata' => [
+                    'period' => $period,
+                    'date_field' => 'date',
+                    'date_from' => $dateFrom,
+                    'date_to' => $dateTo,
+                    'asakai_title_id' => $asakaiTitleId ? (int) $asakaiTitleId : null,
+                ],
+            ], 200);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
