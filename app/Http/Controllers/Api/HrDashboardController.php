@@ -1069,6 +1069,7 @@ class HrDashboardController extends ApiController
                     'total_overtime_index_minutes' => $minutes,
                     'total_overtime_index_formatted' => $hours . ' jam ' . ($minutes > 0 ? $minutes . ' menit' : ''),
                     'total_employees' => $totalEmployees,
+                    'average_overtime_index' => $avgHours,
                     'average_overtime_minutes' => round($averageMinutes, 2),
                     'average_overtime_formatted' => $avgHours . ' jam ' . ($avgMins > 0 ? $avgMins . ' menit' : ''),
                 ];
