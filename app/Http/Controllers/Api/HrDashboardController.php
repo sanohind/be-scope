@@ -1044,7 +1044,7 @@ class HrDashboardController extends ApiController
                     'employee_master.dept_name_en'
                 )
                 ->havingRaw('SUM(COALESCE(attendance_by_period.total_ot, 0)) > 0')
-                ->orderByDesc('total_overtime_minutes')
+                ->orderByRaw('(SUM(COALESCE(attendance_by_period.total_ot, 0)) / NULLIF(COUNT(DISTINCT attendance_by_period.emp_id), 0)) DESC')
                 ->limit(10)
                 ->get();
 
