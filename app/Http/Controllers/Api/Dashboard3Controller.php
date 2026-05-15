@@ -761,7 +761,7 @@ class Dashboard3Controller extends ApiController
             if (!$date) continue;
 
             if (!isset($dailyData[$date])) {
-                $dailyData[$date] = ['period' => $date, 'qty_ok' => 0, 'qty_ng' => 0, 'total_qty' => 0];
+                $dailyData[$date] = ['period' => $date, 'qty_ok' => 0, 'qty_ng' => 0, 'total_qty' => 0, 'qty_plan' => 0];
             }
 
             $status = strtolower($prod->status ?? '');
@@ -776,6 +776,87 @@ class Dashboard3Controller extends ApiController
             }
         }
 
+        // Fetch Planning Data
+        $planQuery = DB::connection('kelola')->table('production_plannings')->where('status', true);
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $planQuery->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
+        }
+        
+        if ($dateFrom && $dateTo) {
+            $start = Carbon::parse($dateFrom);
+            $end = Carbon::parse($dateTo);
+            
+            if ($start->year === $end->year) {
+                $planQuery->where('year', (string)$start->year);
+            } else {
+                $years = [];
+                for ($y = $start->year; $y <= $end->year; $y++) {
+                    $years[] = (string)$y;
+                }
+                $planQuery->whereIn('year', $years);
+            }
+        }
+        $plannings = $planQuery->get();
+
+        $dayWords = [
+            1 => 'one', 2 => 'two', 3 => 'three', 4 => 'four', 5 => 'five',
+            6 => 'six', 7 => 'seven', 8 => 'eight', 9 => 'nine', 10 => 'ten',
+            11 => 'eleven', 12 => 'twelve', 13 => 'thirteen', 14 => 'fourteen', 15 => 'fiveteen',
+            16 => 'sixteen', 17 => 'seventeen', 18 => 'eighteen', 19 => 'nineteen', 20 => 'twenty',
+            21 => 'twenty_one', 22 => 'twenty_two', 23 => 'twenty_three', 24 => 'twenty_four', 25 => 'twenty_five',
+            26 => 'twenty_six', 27 => 'twenty_seven', 28 => 'twenty_eight', 29 => 'twenty_nine', 30 => 'thirty',
+            31 => 'thirty_one'
+        ];
+
+        foreach ($plannings as $plan) {
+            $year = (int)$plan->year;
+            $month = (int)$plan->month;
+            
+            for ($d = 1; $d <= 31; $d++) {
+                if (!checkdate($month, $d, $year)) continue;
+                
+                $word = $dayWords[$d];
+                $qty = (int)($plan->{$word} ?? 0);
+                
+                if ($qty > 0) {
+                    if ($period === 'daily') {
+                        $periodKey = sprintf('%04d-%02d-%02d', $year, $month, $d);
+                        // Optional: Filter precisely by dateFrom and dateTo for daily period
+                        if ($dateFrom && $dateTo) {
+                            if ($periodKey < Carbon::parse($dateFrom)->format('Y-m-d') || $periodKey > Carbon::parse($dateTo)->format('Y-m-d')) {
+                                continue;
+                            }
+                        }
+                    } elseif ($period === 'monthly') {
+                        $periodKey = sprintf('%04d-%02d', $year, $month);
+                        if ($dateFrom && $dateTo) {
+                            $mKey = Carbon::createFromDate($year, $month, 1)->format('Y-m');
+                            if ($mKey < Carbon::parse($dateFrom)->format('Y-m') || $mKey > Carbon::parse($dateTo)->format('Y-m')) {
+                                continue;
+                            }
+                        }
+                    } else {
+                        $periodKey = (string)$year;
+                    }
+                    
+                    if (!isset($dailyData[$periodKey])) {
+                        $dailyData[$periodKey] = ['period' => $periodKey, 'qty_ok' => 0, 'qty_ng' => 0, 'total_qty' => 0, 'qty_plan' => 0];
+                    } elseif (!isset($dailyData[$periodKey]['qty_plan'])) {
+                        $dailyData[$periodKey]['qty_plan'] = 0;
+                    }
+                    
+                    $dailyData[$periodKey]['qty_plan'] += $qty;
+                }
+            }
+        }
+
+        // Ensure all items have qty_plan
+        foreach ($dailyData as $key => $item) {
+            if (!isset($item['qty_plan'])) {
+                $dailyData[$key]['qty_plan'] = 0;
+            }
+        }
+
         // Sort by date ascending
         ksort($dailyData);
 
@@ -783,7 +864,7 @@ class Dashboard3Controller extends ApiController
         if ($dateFrom && $dateTo) {
             $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
             $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData) {
-                return $dailyData[$date] ?? ['period' => $date, 'qty_ok' => 0, 'qty_ng' => 0, 'total_qty' => 0];
+                return $dailyData[$date] ?? ['period' => $date, 'qty_ok' => 0, 'qty_ng' => 0, 'total_qty' => 0, 'qty_plan' => 0];
             })->toArray();
         } else {
             $dailyData = array_values($dailyData);
