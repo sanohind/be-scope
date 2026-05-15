@@ -490,13 +490,17 @@ class Dashboard3Controller extends ApiController
         $planDataByPeriod = collect();
 
         $hasCHorNL = false;
+        $planConnection = 'kelola';
         if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
             $hasCHorNL = in_array('CH', $divisiSelection['codes']) || in_array('NL', $divisiSelection['codes']);
+            if (in_array('CH', $divisiSelection['codes'])) {
+                $planConnection = 'kelola7';
+            }
         }
 
         if ($hasCHorNL) {
             // MongoDB fetch logic
-            $planQuery = DB::connection('kelola7')->table('production_plannings')->where('status', true);
+            $planQuery = DB::connection($planConnection)->table('production_plannings')->where('status', true);
             $planQuery->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
 
             if ($dateFrom) {
@@ -861,8 +865,7 @@ class Dashboard3Controller extends ApiController
         // Fetch Planning Data
         $planConnection = 'kelola';
         if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
-            $hasCHorNL = in_array('CH', $divisiSelection['codes']) || in_array('NL', $divisiSelection['codes']);
-            if ($hasCHorNL) {
+            if (in_array('CH', $divisiSelection['codes'])) {
                 $planConnection = 'kelola7';
             }
         }
