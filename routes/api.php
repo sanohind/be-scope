@@ -282,6 +282,9 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/by-division', [Dashboard3Controller::class, 'productionByDivision']);
         Route::get('/trend', [Dashboard3Controller::class, 'productionTrend']);
         Route::get('/outstanding-trend', [Dashboard3Controller::class, 'outstandingTrend']);
+        Route::get('/daily-production-qty', [Dashboard3Controller::class, 'dailyProductionQty']);
+        Route::get('/daily-ng-qty', [Dashboard3Controller::class, 'dailyNgQty']);
+        Route::get('/top-ng-type', [Dashboard3Controller::class, 'topNgType']);
         Route::get('/all-data', [Dashboard3Controller::class, 'getAllData']);
     });
 

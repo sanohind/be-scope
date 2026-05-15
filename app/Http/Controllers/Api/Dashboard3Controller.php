@@ -678,7 +678,251 @@ class Dashboard3Controller extends ApiController
             'production_outstanding_analysis' => $this->productionOutstandingAnalysis($request)->getData(true),
             'production_by_division' => $this->productionByDivision($request)->getData(true),
             'production_trend' => $this->productionTrend($request)->getData(true),
-            'outstanding_trend' => $this->outstandingTrend($request)->getData(true)
+            'outstanding_trend' => $this->outstandingTrend($request)->getData(true),
+            'daily_production_qty' => $this->dailyProductionQty($request)->getData(true),
+            'daily_ng_qty' => $this->dailyNgQty($request)->getData(true),
+            'top_ng_type' => $this->topNgType($request)->getData(true)
+        ]);
+    }
+
+    /**
+     * Helper to extract date flexibly based on BSON/JSON formats
+     */
+    private function extractMongoDate($timeObj, $period = 'daily')
+    {
+        if (!$timeObj) return null;
+        
+        $carbon = null;
+        if (is_array($timeObj) && isset($timeObj['$date'])) {
+            $carbon = Carbon::parse($timeObj['$date']);
+        } elseif (is_object($timeObj) && method_exists($timeObj, 'toDateTime')) {
+            $carbon = Carbon::instance($timeObj->toDateTime());
+        } elseif (is_string($timeObj)) {
+            $carbon = Carbon::parse($timeObj);
+        }
+
+        if ($carbon) {
+            if ($period === 'monthly') {
+                return $carbon->format('Y-m');
+            } elseif ($period === 'yearly') {
+                return $carbon->format('Y');
+            }
+            return $carbon->format('Y-m-d');
+        }
+        
+        return null;
+    }
+
+    /**
+     * Helper to map ERP division codes to Kelola plan_code
+     */
+    private function mapKelolaDivisions(array $erpCodes): array
+    {
+        $map = [
+            'NL' => 'NYL',
+            'BZ' => 'BRZ',
+            'CH' => 'CHS',
+        ];
+
+        return array_map(function ($code) use ($map) {
+            return $map[$code] ?? $code;
+        }, $erpCodes);
+    }
+
+    /**
+     * Menampilkan qty production harian dari MongoDB kelola
+     * Di grouping per hari, dipisahkan status ok dan ng
+     */
+    public function dailyProductionQty(Request $request): JsonResponse
+    {
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $period = $request->get('period', 'daily');
+        $divisiSelection = $this->resolveDivisionFilter($request);
+
+        $query = DB::connection('kelola')->table('productions');
+        if ($dateFrom) {
+            $query->where('production_time', '>=', Carbon::parse($dateFrom)->startOfDay());
+        }
+        if ($dateTo) {
+            $query->where('production_time', '<=', Carbon::parse($dateTo)->endOfDay());
+        }
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $query->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
+        }
+
+        $productions = $query->get();
+
+        $dailyData = [];
+
+        // Process OK and NG directly from productions
+        foreach ($productions as $prod) {
+            $date = $this->extractMongoDate($prod->production_time ?? $prod->created_at ?? null, $period);
+            if (!$date) continue;
+
+            if (!isset($dailyData[$date])) {
+                $dailyData[$date] = ['period' => $date, 'qty_ok' => 0, 'qty_ng' => 0, 'total_qty' => 0];
+            }
+
+            $status = strtolower($prod->status ?? '');
+            $qty = (int) ($prod->qty ?? 0);
+
+            if ($status === 'ok') {
+                $dailyData[$date]['qty_ok'] += $qty;
+                $dailyData[$date]['total_qty'] += $qty;
+            } elseif ($status === 'ng') {
+                $dailyData[$date]['qty_ng'] += $qty;
+                $dailyData[$date]['total_qty'] += $qty;
+            }
+        }
+
+        // Sort by date ascending
+        ksort($dailyData);
+
+        // Fill missing periods
+        if ($dateFrom && $dateTo) {
+            $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+            $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData) {
+                return $dailyData[$date] ?? ['period' => $date, 'qty_ok' => 0, 'qty_ng' => 0, 'total_qty' => 0];
+            })->toArray();
+        } else {
+            $dailyData = array_values($dailyData);
+        }
+
+        return response()->json([
+            'data' => $dailyData,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'production_time'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
+        ]);
+    }
+
+    /**
+     * Menampilkan qty NG harian
+     */
+    public function dailyNgQty(Request $request): JsonResponse
+    {
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $period = $request->get('period', 'daily');
+        $divisiSelection = $this->resolveDivisionFilter($request);
+
+        $query = DB::connection('kelola')->table('productions')
+            ->where('status', 'ng');
+
+        if ($dateFrom) {
+            $query->where('production_time', '>=', Carbon::parse($dateFrom)->startOfDay());
+        }
+        if ($dateTo) {
+            $query->where('production_time', '<=', Carbon::parse($dateTo)->endOfDay());
+        }
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $query->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
+        }
+
+        $productions = $query->get();
+        $dailyData = [];
+
+        foreach ($productions as $prod) {
+            $date = $this->extractMongoDate($prod->production_time ?? $prod->created_at ?? null, $period);
+            if (!$date) continue;
+
+            if (!isset($dailyData[$date])) {
+                $dailyData[$date] = ['period' => $date, 'qty_ng' => 0];
+            }
+
+            $dailyData[$date]['qty_ng'] += (int) ($prod->qty ?? 0);
+        }
+
+        ksort($dailyData);
+
+        if ($dateFrom && $dateTo) {
+            $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+            $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData) {
+                return $dailyData[$date] ?? ['period' => $date, 'qty_ng' => 0];
+            })->toArray();
+        } else {
+            $dailyData = array_values($dailyData);
+        }
+
+        return response()->json([
+            'data' => $dailyData,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'production_time'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
+        ]);
+    }
+
+    /**
+     * Menampilkan top NG Type (ng_name) dari production_details
+     */
+    public function topNgType(Request $request): JsonResponse
+    {
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $divisiSelection = $this->resolveDivisionFilter($request);
+        $limit = $request->get('limit', 10);
+
+        $query = DB::connection('kelola')->table('productions')
+            ->where('status', 'ng');
+
+        if ($dateFrom) {
+            $query->where('production_time', '>=', Carbon::parse($dateFrom)->startOfDay());
+        }
+        if ($dateTo) {
+            $query->where('production_time', '<=', Carbon::parse($dateTo)->endOfDay());
+        }
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $query->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
+        }
+
+        $productions = $query->get();
+        $searchIds = [];
+
+        // Collect IDs (as string since production_id in details is a string)
+        foreach ($productions as $prod) {
+            $rawId = $prod->id ?? $prod->_id ?? null;
+            if ($rawId) {
+                $searchIds[] = (string) $rawId;
+            }
+        }
+
+        $searchIds = array_unique($searchIds);
+        $ngTypes = [];
+
+        if (!empty($searchIds)) {
+            // Chunking query to prevent query payload from being too massive
+            $chunks = array_chunk($searchIds, 1000);
+            
+            foreach ($chunks as $chunk) {
+                $details = DB::connection('kelola')->table('production_details')
+                    ->whereIn('production_id', $chunk)
+                    ->get();
+
+                foreach ($details as $detail) {
+                    $ngName = $detail->ng_name ?? 'Unknown';
+                    if (!isset($ngTypes[$ngName])) {
+                        $ngTypes[$ngName] = 0;
+                    }
+                    $ngTypes[$ngName] += (int) ($detail->qty ?? 0);
+                }
+            }
+        }
+
+        arsort($ngTypes);
+
+        $data = [];
+        $count = 0;
+        foreach ($ngTypes as $name => $qty) {
+            if ($count++ >= $limit) break;
+            $data[] = [
+                'ng_name' => $name,
+                'qty' => $qty
+            ];
+        }
+
+        return response()->json([
+            'data' => $data,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'production_time'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
 }

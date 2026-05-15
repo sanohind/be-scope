@@ -168,6 +168,18 @@ return [
             'engine' => null,
         ],
 
+        'kelola' => [
+            'driver' => 'mongodb',
+            'host' => env('DB_HOST6', '10.1.10.39'),
+            'port' => env('DB_PORT6', 27017),
+            'database' => env('DB_DATABASE6', 'production'),
+            'username' => env('DB_USERNAME6', ''),
+            'password' => env('DB_PASSWORD6', ''),
+            'options' => [
+                'database' => env('DB_DATABASE6', 'admin'),
+            ],
+        ],
+
     ],
 
     /*
