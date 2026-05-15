@@ -180,6 +180,18 @@ return [
             ],
         ],
 
+        'kelola7' => [
+            'driver' => 'mongodb',
+            'host' => env('DB_HOST7', '10.1.10.39'),
+            'port' => env('DB_PORT7', 27017),
+            'database' => env('DB_DATABASE7', 'sanoh-traceability'),
+            'username' => env('DB_USERNAME7', ''),
+            'password' => env('DB_PASSWORD7', ''),
+            'options' => [
+                'database' => env('DB_DATABASE7', 'admin'), // Optional: or 'sanoh-traceability' if auth is there
+            ],
+        ],
+
     ],
 
     /*

@@ -487,7 +487,14 @@ class Dashboard3Controller extends ApiController
         }
 
         // 2. Prepare ProductionPlan Query
-        $planQuery = ProductionPlan::query();
+        $planConnection = 'kelola';
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $hasCHorNL = in_array('CH', $divisiSelection['codes']) || in_array('NL', $divisiSelection['codes']);
+            if ($hasCHorNL) {
+                $planConnection = 'kelola7';
+            }
+        }
+        $planQuery = (new ProductionPlan())->setConnection($planConnection)->newQuery();
 
         if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
             $planQuery->whereIn('divisi', $divisiSelection['codes']);
@@ -777,7 +784,14 @@ class Dashboard3Controller extends ApiController
         }
 
         // Fetch Planning Data
-        $planQuery = DB::connection('kelola')->table('production_plannings')->where('status', true);
+        $planConnection = 'kelola';
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $hasCHorNL = in_array('CH', $divisiSelection['codes']) || in_array('NL', $divisiSelection['codes']);
+            if ($hasCHorNL) {
+                $planConnection = 'kelola7';
+            }
+        }
+        $planQuery = DB::connection($planConnection)->table('production_plannings')->where('status', true);
         if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
             $planQuery->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
         }
