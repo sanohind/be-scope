@@ -57,7 +57,8 @@ class FeatureMiddleware
                 return $isTopManagement;
 
             case 'planning-manage':
-                return $deptCode === 'PPIC';
+                if ($isTopManagement) return true;
+                return in_array($deptCode, ['PPIC', 'TOP']);
 
             case 'inventory':
             case 'inventory-movement':
