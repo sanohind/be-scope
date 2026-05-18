@@ -48,6 +48,28 @@ class ProductionPlanController extends ApiController
             $PERIOD_COL = 'E';
             $FIRST_DAY_COL = 'F'; // Column F = day 1
 
+            // OPTIMIZATION: Fetch existing records beforehand to avoid N+1 queries
+            $allPartnos = [];
+            foreach ($rows as $row) {
+                if (!empty($row[$PARTNO_COL])) {
+                    $allPartnos[] = trim((string)$row[$PARTNO_COL]);
+                }
+            }
+            $allPartnos = array_unique($allPartnos);
+            
+            $existingDict = [];
+            if (!empty($allPartnos)) {
+                // Chunk the partnos if there are too many (e.g. > 1000) to avoid SQL bind limits
+                foreach (array_chunk($allPartnos, 1000) as $chunk) {
+                    $existingRecords = ProductionPlan::whereIn('partno', $chunk)->get(['id', 'partno', 'divisi', 'plan_date']);
+                    foreach ($existingRecords as $record) {
+                        $dateStr = $record->plan_date instanceof Carbon ? $record->plan_date->format('Y-m-d') : Carbon::parse($record->plan_date)->format('Y-m-d');
+                        $key = $record->partno . '_' . $record->divisi . '_' . $dateStr;
+                        $existingDict[$key] = $record->id;
+                    }
+                }
+            }
+
             foreach ($rows as $rowIndex => $row) {
                 // Get partno, divisi, year, period from fixed columns
                 $partno = $row[$PARTNO_COL] ?? null;
@@ -122,15 +144,12 @@ class ProductionPlanController extends ApiController
                     }
 
                     // Check if record with same partno, divisi and plan_date exists
-                    $existingRecord = ProductionPlan::where('partno', $partnoTrimmed)
-                        ->where('divisi', $divisiTrimmed)
-                        ->where('plan_date', $planDate)
-                        ->first();
+                    $key = $partnoTrimmed . '_' . $divisiTrimmed . '_' . $planDate;
 
-                    if ($existingRecord) {
+                    if (isset($existingDict[$key])) {
                         // Update existing record
                         $updates[] = [
-                            'id' => $existingRecord->id,
+                            'id' => $existingDict[$key],
                             'qty_plan' => $qtyPlanParsed,
                             'updated_at' => $now,
                         ];
