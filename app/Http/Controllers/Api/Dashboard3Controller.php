@@ -487,143 +487,56 @@ class Dashboard3Controller extends ApiController
         }
 
         // 2 & 3. Prepare ProductionPlan Query and Aggregate
-        $planDataByPeriod = collect();
+        $planQuery = ProductionPlan::query();
 
-        $hasCHorNL = false;
-        $planConnection = 'kelola';
         if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
-            $hasCHorNL = in_array('CH', $divisiSelection['codes']) || in_array('NL', $divisiSelection['codes']);
-            if (in_array('CH', $divisiSelection['codes'])) {
-                $planConnection = 'kelola7';
-            }
+            $planQuery->whereIn('divisi', $divisiSelection['codes']);
         }
 
-        if ($hasCHorNL) {
-            // MongoDB fetch logic
-            $planQuery = DB::connection($planConnection)->table('production_plannings')->where('status', true);
-            $planQuery->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
-
+        if ($period === 'daily') {
             if ($dateFrom) {
-                $start = Carbon::parse($dateFrom);
-                if ($dateTo) {
-                    $end = Carbon::parse($dateTo);
-                    if ($start->year === $end->year) {
-                        $planQuery->where('year', (string)$start->year);
-                    } else {
-                        $years = [];
-                        for ($y = $start->year; $y <= $end->year; $y++) {
-                            $years[] = (string)$y;
-                        }
-                        $planQuery->whereIn('year', $years);
-                    }
-                } else {
-                    $planQuery->where('year', (string)$start->year);
-                }
+                $year = date('Y', strtotime($dateFrom));
+                $month = date('m', strtotime($dateFrom));
+                $planQuery->whereRaw("YEAR(plan_date) = ?", [$year])
+                          ->whereRaw("MONTH(plan_date) = ?", [$month]);
             }
-
-            $plannings = $planQuery->get();
-            $dayWords = [
-                1 => 'one', 2 => 'two', 3 => 'three', 4 => 'four', 5 => 'five',
-                6 => 'six', 7 => 'seven', 8 => 'eight', 9 => 'nine', 10 => 'ten',
-                11 => 'eleven', 12 => 'twelve', 13 => 'thirteen', 14 => 'fourteen', 15 => 'fiveteen',
-                16 => 'sixteen', 17 => 'seventeen', 18 => 'eighteen', 19 => 'nineteen', 20 => 'twenty',
-                21 => 'twenty_one', 22 => 'twenty_two', 23 => 'twenty_three', 24 => 'twenty_four', 25 => 'twenty_five',
-                26 => 'twenty_six', 27 => 'twenty_seven', 28 => 'twenty_eight', 29 => 'twenty_nine', 30 => 'thirty',
-                31 => 'thirty_one'
-            ];
-
-            $tempData = [];
-            foreach ($plannings as $plan) {
-                $year = (int)$plan->year;
-                $month = (int)$plan->month;
-                
-                for ($d = 1; $d <= 31; $d++) {
-                    if (!checkdate($month, $d, $year)) continue;
-                    
-                    $word = $dayWords[$d];
-                    $qty = (int)($plan->{$word} ?? 0);
-                    
-                    if ($qty > 0) {
-                        if ($period === 'daily') {
-                            $periodKey = sprintf('%04d-%02d-%02d', $year, $month, $d);
-                        } elseif ($period === 'monthly') {
-                            $periodKey = sprintf('%04d-%02d', $year, $month);
-                        } else {
-                            $periodKey = (string)$year;
-                        }
-
-                        // Filter by date ranges
-                        if ($dateFrom && $dateTo) {
-                            if ($period === 'daily') {
-                                if ($periodKey < Carbon::parse($dateFrom)->format('Y-m-d') || $periodKey > Carbon::parse($dateTo)->format('Y-m-d')) continue;
-                            } elseif ($period === 'monthly') {
-                                $mKey = Carbon::createFromDate($year, $month, 1)->format('Y-m');
-                                if ($mKey < Carbon::parse($dateFrom)->format('Y-m') || $mKey > Carbon::parse($dateTo)->format('Y-m')) continue;
-                            }
-                        }
-
-                        if (!isset($tempData[$periodKey])) {
-                            $tempData[$periodKey] = ['period' => $periodKey, 'qty_plan' => 0];
-                        }
-                        $tempData[$periodKey]['qty_plan'] += $qty;
-                    }
-                }
+        } elseif ($period === 'monthly') {
+            if ($dateFrom) {
+                $year = date('Y', strtotime($dateFrom));
+                $planQuery->whereRaw("YEAR(plan_date) = ?", [$year]);
             }
-            $planDataByPeriod = collect($tempData);
-
-        } else {
-            // Original MySQL logic
-            $planQuery = ProductionPlan::query();
-
-            if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
-                $planQuery->whereIn('divisi', $divisiSelection['codes']);
+        } elseif ($period === 'yearly') {
+            if ($dateFrom) {
+                $planQuery->where('plan_date', '>=', $dateFrom);
             }
-
-            if ($period === 'daily') {
-                if ($dateFrom) {
-                    $year = date('Y', strtotime($dateFrom));
-                    $month = date('m', strtotime($dateFrom));
-                    $planQuery->whereRaw("YEAR(plan_date) = ?", [$year])
-                              ->whereRaw("MONTH(plan_date) = ?", [$month]);
-                }
-            } elseif ($period === 'monthly') {
-                if ($dateFrom) {
-                    $year = date('Y', strtotime($dateFrom));
-                    $planQuery->whereRaw("YEAR(plan_date) = ?", [$year]);
-                }
-            } elseif ($period === 'yearly') {
-                if ($dateFrom) {
-                    $planQuery->where('plan_date', '>=', $dateFrom);
-                }
-                if ($dateTo) {
-                    $planQuery->where('plan_date', '<=', $dateTo);
-                }
+            if ($dateTo) {
+                $planQuery->where('plan_date', '<=', $dateTo);
             }
-
-            $planDateFormat = $this->getDateFormatByPeriod($period, 'plan_date', $planQuery);
-            $planDataByPeriod = $planQuery->selectRaw("$planDateFormat as period")
-                ->selectRaw('SUM(qty_plan) as qty_plan')
-                ->groupByRaw($planDateFormat)
-                ->orderByRaw($planDateFormat)
-                ->get()
-                ->map(function ($item) use ($period) {
-                    $periodValue = trim((string) $item->period);
-
-                    if ($period === 'daily' && !preg_match('/^\d{4}-\d{2}-\d{2}/', $periodValue)) {
-                        try {
-                            $periodValue = Carbon::parse($periodValue)->format('Y-m-d');
-                        } catch (\Exception $e) {
-                            // Keep original
-                        }
-                    }
-
-                    return [
-                        'period' => $periodValue,
-                        'qty_plan' => (float) ($item->qty_plan ?? 0)
-                    ];
-                })
-                ->keyBy('period');
         }
+
+        $planDateFormat = $this->getDateFormatByPeriod($period, 'plan_date', $planQuery);
+        $planDataByPeriod = $planQuery->selectRaw("$planDateFormat as period")
+            ->selectRaw('SUM(qty_plan) as qty_plan')
+            ->groupByRaw($planDateFormat)
+            ->orderByRaw($planDateFormat)
+            ->get()
+            ->map(function ($item) use ($period) {
+                $periodValue = trim((string) $item->period);
+
+                if ($period === 'daily' && !preg_match('/^\d{4}-\d{2}-\d{2}/', $periodValue)) {
+                    try {
+                        $periodValue = Carbon::parse($periodValue)->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        // Keep original
+                    }
+                }
+
+                return [
+                    'period' => $periodValue,
+                    'qty_plan' => (float) ($item->qty_plan ?? 0)
+                ];
+            })
+            ->keyBy('period');
 
         // 4. Aggregate Report Data by Period
         $dateFormat = $this->getDateFormatByPeriod($period, 'trans_date', $query);
