@@ -680,7 +680,8 @@ class Dashboard3Controller extends ApiController
             'outstanding_trend' => $this->outstandingTrend($request)->getData(true),
             'daily_production_qty' => $this->dailyProductionQty($request)->getData(true),
             'daily_ng_qty' => $this->dailyNgQty($request)->getData(true),
-            'top_ng_type' => $this->topNgType($request)->getData(true)
+            'top_ng_type' => $this->topNgType($request)->getData(true),
+            'breakdown_cause_distribution' => $this->breakdownCauseDistribution($request)->getData(true)
         ]);
     }
 
@@ -1008,6 +1009,161 @@ class Dashboard3Controller extends ApiController
         return response()->json([
             'data' => $data,
             'filter_metadata' => $this->getPeriodMetadata($request, 'production_time'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
+        ]);
+    }
+
+    /**
+     * Chart: Breakdown Cause Distribution - Pie/Donut Chart
+     *
+     * Query Parameters:
+     * - period: Filter by period (daily, monthly, yearly) - default: monthly
+     * - date_from: Start date filter (start)
+     * - date_to: End date filter (start)
+     */
+    public function breakdownCauseDistribution(Request $request): JsonResponse
+    {
+        $divisiSelection = $this->resolveDivisionFilter($request);
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $period = $request->get('period', 'daily');
+        $metric = $request->get('metric', 'duration'); // 'duration' or 'count'
+
+        $query = DB::connection('kelola')->table('breakdown_productions');
+
+        if ($dateFrom) {
+            $query->where('start', '>=', Carbon::parse($dateFrom)->startOfDay());
+        }
+        if ($dateTo) {
+            $query->where('start', '<=', Carbon::parse($dateTo)->endOfDay());
+        }
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $query->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
+        }
+
+        $breakdowns = $query->get();
+
+        $dailyData = [];
+        $uniqueCauses = [];
+        $totalBreakdowns = 0;
+
+        foreach ($breakdowns as $breakdown) {
+            $startObj = is_array($breakdown) ? ($breakdown['start'] ?? null) : ($breakdown->start ?? null);
+            $dateStr = $this->extractMongoDate($startObj, $period);
+            if (!$dateStr) continue;
+
+            if (!isset($dailyData[$dateStr])) {
+                $dailyData[$dateStr] = [
+                    'period' => $dateStr,
+                    'total_duration_minutes' => 0,
+                    'total_count' => 0
+                ];
+            }
+
+            $cause = is_array($breakdown) ? ($breakdown['cause'] ?? 'UNKNOWN') : ($breakdown->cause ?? 'UNKNOWN');
+            $uniqueCauses[$cause] = true;
+
+            $endObj = is_array($breakdown) ? ($breakdown['end'] ?? null) : ($breakdown->end ?? null);
+
+            $startTime = null;
+            $endTime = null;
+
+            if ($startObj) {
+                if (is_array($startObj) && isset($startObj['$date'])) {
+                    $startTime = Carbon::parse($startObj['$date']);
+                } elseif (is_object($startObj) && method_exists($startObj, 'toDateTime')) {
+                    $startTime = Carbon::instance($startObj->toDateTime());
+                } elseif (is_string($startObj)) {
+                    $startTime = Carbon::parse($startObj);
+                }
+            }
+
+            if ($endObj) {
+                if (is_array($endObj) && isset($endObj['$date'])) {
+                    $endTime = Carbon::parse($endObj['$date']);
+                } elseif (is_object($endObj) && method_exists($endObj, 'toDateTime')) {
+                    $endTime = Carbon::instance($endObj->toDateTime());
+                } elseif (is_string($endObj)) {
+                    $endTime = Carbon::parse($endObj);
+                }
+            }
+
+            if (!isset($dailyData[$dateStr][$cause])) {
+                $dailyData[$dateStr][$cause] = 0;
+            }
+
+            if ($startTime && $endTime) {
+                $diffSec = $startTime->diffInSeconds($endTime);
+                $dailyData[$dateStr]['total_duration_minutes'] += ($diffSec / 60);
+                
+                if ($metric === 'duration') {
+                    $dailyData[$dateStr][$cause] += $diffSec;
+                }
+            }
+            
+            if ($metric === 'count') {
+                $dailyData[$dateStr][$cause] += 1;
+            }
+            
+            $dailyData[$dateStr]['total_count']++;
+            $totalBreakdowns++;
+        }
+
+        // Convert seconds to minutes for each cause if metric is duration
+        foreach ($dailyData as $dateStr => &$item) {
+            foreach (array_keys($uniqueCauses) as $cause) {
+                if (isset($item[$cause])) {
+                    if ($metric === 'duration') {
+                        $item[$cause] = round($item[$cause] / 60, 2);
+                    }
+                } else {
+                    $item[$cause] = 0;
+                }
+            }
+            $item['total_duration_minutes'] = round($item['total_duration_minutes'], 2);
+        }
+        unset($item);
+
+        // Sort by date ascending
+        ksort($dailyData);
+
+        // Fill missing periods if filters are applied
+        if ($dateFrom && $dateTo) {
+            $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+            
+            // Filter out periods that are out of bounds based on period type
+            if ($period === 'daily') {
+                $allPeriods = array_filter($allPeriods, function($p) use ($dateFrom, $dateTo) {
+                    return $p >= Carbon::parse($dateFrom)->format('Y-m-d') && $p <= Carbon::parse($dateTo)->format('Y-m-d');
+                });
+            } elseif ($period === 'monthly') {
+                $allPeriods = array_filter($allPeriods, function($p) use ($dateFrom, $dateTo) {
+                    return $p >= Carbon::parse($dateFrom)->format('Y-m') && $p <= Carbon::parse($dateTo)->format('Y-m');
+                });
+            }
+
+            $allPeriods = array_values($allPeriods);
+
+            $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData, $uniqueCauses) {
+                $emptyItem = [
+                    'period' => $date,
+                    'total_duration_minutes' => 0,
+                    'total_count' => 0
+                ];
+                foreach (array_keys($uniqueCauses) as $cause) {
+                    $emptyItem[$cause] = 0;
+                }
+                return $dailyData[$date] ?? $emptyItem;
+            })->toArray();
+        } else {
+            $dailyData = array_values($dailyData);
+        }
+
+        return response()->json([
+            'data' => $dailyData,
+            'causes' => array_keys($uniqueCauses),
+            'total_breakdowns' => $totalBreakdowns,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'start'),
             'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
     }
