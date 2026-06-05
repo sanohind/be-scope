@@ -934,16 +934,13 @@ class Dashboard3Controller extends ApiController
             if (!isset($dailyData[$date])) {
                 $dailyData[$date] = [
                     'period' => $date,
-                    'qty_ok' => 0,
-                    'qty_ng' => 0,
-                    'total_qty' => 0,
+                    'qty_actual' => 0,
                     'qty_plan' => 0
                 ];
             }
 
             $qty = (float) ($act->actual_qty ?? 0);
-            $dailyData[$date]['qty_ok'] += $qty;
-            $dailyData[$date]['total_qty'] += $qty;
+            $dailyData[$date]['qty_actual'] += $qty;
         }
 
         // Process Plan Qty
@@ -954,9 +951,7 @@ class Dashboard3Controller extends ApiController
             if (!isset($dailyData[$date])) {
                 $dailyData[$date] = [
                     'period' => $date,
-                    'qty_ok' => 0,
-                    'qty_ng' => 0,
-                    'total_qty' => 0,
+                    'qty_actual' => 0,
                     'qty_plan' => 0
                 ];
             }
@@ -974,9 +969,7 @@ class Dashboard3Controller extends ApiController
             $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData) {
                 return $dailyData[$date] ?? [
                     'period' => $date,
-                    'qty_ok' => 0,
-                    'qty_ng' => 0,
-                    'total_qty' => 0,
+                    'qty_actual' => 0,
                     'qty_plan' => 0
                 ];
             })->toArray();
