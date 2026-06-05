@@ -192,6 +192,20 @@ return [
             ],
         ],
 
+        'odoo' => [
+            'driver' => 'pgsql',
+            'host' => env('DB_HOST8', '10.1.10.142'),
+            'port' => env('DB_PORT8', '5432'),
+            'database' => env('DB_DATABASE8', 'sanoh-prod'),
+            'username' => env('DB_USERNAME8', 'admin_sanoh'),
+            'password' => env('DB_PASSWORD8', 'admin_sanoh_2025'),
+            'charset' => 'utf8',
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'search_path' => 'public',
+            'sslmode' => 'prefer',
+        ],
+
     ],
 
     /*
