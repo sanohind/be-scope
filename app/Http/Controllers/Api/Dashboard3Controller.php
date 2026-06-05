@@ -884,6 +884,132 @@ class Dashboard3Controller extends ApiController
     }
 
     /**
+     * Menampilkan qty production harian dari Odoo (PostgreSQL)
+     */
+    public function dailyProductionQtyOdoo(Request $request): JsonResponse
+    {
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $period = $request->get('period', 'daily');
+
+        // Fetch Actual Qty
+        $actualQuery = DB::connection('odoo')->table('public.stock_move_line')
+            ->selectRaw('date(date) as date, sum(quantity) as actual_qty')
+            ->where('reference', 'Stock FG Receipt From E-Chutter');
+
+        if ($dateFrom) {
+            $actualQuery->where('date', '>=', Carbon::parse($dateFrom)->startOfDay());
+        }
+        if ($dateTo) {
+            $actualQuery->where('date', '<=', Carbon::parse($dateTo)->endOfDay());
+        }
+
+        $actuals = $actualQuery->groupByRaw('date(date)')
+            ->orderByRaw('date(date) asc')
+            ->get();
+
+        // Fetch Plan Qty
+        $planQuery = DB::connection('odoo')->table('public.pramadya_rail')
+            ->selectRaw('date(schedule_date) as schedule_date, sum(qty) as qty')
+            ->where('rail_type', 'fg');
+
+        if ($dateFrom) {
+            $planQuery->where('schedule_date', '>=', Carbon::parse($dateFrom)->startOfDay());
+        }
+        if ($dateTo) {
+            $planQuery->where('schedule_date', '<=', Carbon::parse($dateTo)->endOfDay());
+        }
+
+        $plans = $planQuery->groupByRaw('date(schedule_date)')
+            ->orderByRaw('date(schedule_date) asc')
+            ->get();
+
+        $dailyData = [];
+
+        // Process Actual Qty
+        foreach ($actuals as $act) {
+            $date = $this->extractOdooDate($act->date, $period);
+            if (!$date) continue;
+
+            if (!isset($dailyData[$date])) {
+                $dailyData[$date] = [
+                    'period' => $date,
+                    'qty_ok' => 0,
+                    'qty_ng' => 0,
+                    'total_qty' => 0,
+                    'qty_plan' => 0
+                ];
+            }
+
+            $qty = (float) ($act->actual_qty ?? 0);
+            $dailyData[$date]['qty_ok'] += $qty;
+            $dailyData[$date]['total_qty'] += $qty;
+        }
+
+        // Process Plan Qty
+        foreach ($plans as $pl) {
+            $date = $this->extractOdooDate($pl->schedule_date, $period);
+            if (!$date) continue;
+
+            if (!isset($dailyData[$date])) {
+                $dailyData[$date] = [
+                    'period' => $date,
+                    'qty_ok' => 0,
+                    'qty_ng' => 0,
+                    'total_qty' => 0,
+                    'qty_plan' => 0
+                ];
+            }
+
+            $qty = (float) ($pl->qty ?? 0);
+            $dailyData[$date]['qty_plan'] += $qty;
+        }
+
+        // Sort by date ascending
+        ksort($dailyData);
+
+        // Fill missing periods
+        if ($dateFrom && $dateTo) {
+            $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+            $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData) {
+                return $dailyData[$date] ?? [
+                    'period' => $date,
+                    'qty_ok' => 0,
+                    'qty_ng' => 0,
+                    'total_qty' => 0,
+                    'qty_plan' => 0
+                ];
+            })->toArray();
+        } else {
+            $dailyData = array_values($dailyData);
+        }
+
+        return response()->json([
+            'data' => $dailyData,
+            'filter_metadata' => $this->getPeriodMetadata($request, 'date'),
+        ]);
+    }
+
+    /**
+     * Helper to extract date flexibly for Odoo queries
+     */
+    private function extractOdooDate($dateVal, $period = 'daily')
+    {
+        if (!$dateVal) return null;
+        try {
+            $carbon = Carbon::parse($dateVal);
+            if ($period === 'monthly') {
+                return $carbon->format('Y-m');
+            } elseif ($period === 'yearly') {
+                return $carbon->format('Y');
+            }
+            return $carbon->format('Y-m-d');
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    /**
      * Menampilkan qty NG harian
      */
     public function dailyNgQty(Request $request): JsonResponse
