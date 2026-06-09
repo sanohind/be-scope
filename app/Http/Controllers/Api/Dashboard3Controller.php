@@ -884,6 +884,103 @@ class Dashboard3Controller extends ApiController
     }
 
     /**
+     * Menampilkan qty production harian detail berdasarkan main process
+     */
+    public function dailyProductionQtyDetail(Request $request): JsonResponse
+    {
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
+        $period = $request->get('period', 'daily');
+        $divisiSelection = $this->resolveDivisionFilter($request);
+
+        $query = DB::connection('kelola')->table('productions');
+
+        if ($dateFrom) {
+            $query->where('production_time', '>=', Carbon::parse($dateFrom)->startOfDay());
+        }
+        if ($dateTo) {
+            $query->where('production_time', '<=', Carbon::parse($dateTo)->endOfDay());
+        }
+        if (!empty($divisiSelection['codes']) && !$divisiSelection['is_all']) {
+            $query->whereIn('plan_code', $this->mapKelolaDivisions($divisiSelection['codes']));
+        }
+
+        $productions = $query->get();
+        $dailyData = [];
+        $uniqueMainProcesses = [];
+
+        foreach ($productions as $prod) {
+            $date = $this->extractMongoDate($prod->production_time ?? $prod->created_at ?? null, $period);
+            if (!$date) continue;
+
+            if (!isset($dailyData[$date])) {
+                $dailyData[$date] = ['period' => $date, 'total_qty' => 0];
+            }
+
+            $qty = (int) ($prod->qty ?? 0);
+            $dailyData[$date]['total_qty'] += $qty;
+
+            $mainProcess = $prod->main_process_name ?? 'Unknown';
+            if ($mainProcess === '') $mainProcess = 'Unknown';
+            $uniqueMainProcesses[$mainProcess] = true;
+
+            if (!isset($dailyData[$date][$mainProcess])) {
+                $dailyData[$date][$mainProcess] = 0;
+            }
+            $dailyData[$date][$mainProcess] += $qty;
+        }
+
+        // Fill missing 0 for all unique main processes in every period
+        foreach ($dailyData as $date => &$item) {
+            foreach (array_keys($uniqueMainProcesses) as $process) {
+                if (!isset($item[$process])) {
+                    $item[$process] = 0;
+                }
+            }
+        }
+        unset($item);
+
+        ksort($dailyData);
+
+        if ($dateFrom && $dateTo) {
+            $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
+            
+            if ($period === 'daily') {
+                $allPeriods = array_filter($allPeriods, function($p) use ($dateFrom, $dateTo) {
+                    return $p >= Carbon::parse($dateFrom)->format('Y-m-d') && $p <= Carbon::parse($dateTo)->format('Y-m-d');
+                });
+            } elseif ($period === 'monthly') {
+                $allPeriods = array_filter($allPeriods, function($p) use ($dateFrom, $dateTo) {
+                    return $p >= Carbon::parse($dateFrom)->format('Y-m') && $p <= Carbon::parse($dateTo)->format('Y-m');
+                });
+            }
+
+            $allPeriods = array_values($allPeriods);
+            
+            $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData, $uniqueMainProcesses) {
+                if (isset($dailyData[$date])) {
+                    return $dailyData[$date];
+                }
+                
+                $emptyItem = ['period' => $date, 'total_qty' => 0];
+                foreach (array_keys($uniqueMainProcesses) as $process) {
+                    $emptyItem[$process] = 0;
+                }
+                return $emptyItem;
+            })->toArray();
+        } else {
+            $dailyData = array_values($dailyData);
+        }
+
+        return response()->json([
+            'data' => $dailyData,
+            'main_processes' => array_keys($uniqueMainProcesses),
+            'filter_metadata' => $this->getPeriodMetadata($request, 'production_time'),
+            'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
+        ]);
+    }
+
+    /**
      * Menampilkan qty production harian dari Odoo (PostgreSQL)
      */
     public function dailyProductionQtyOdoo(Request $request): JsonResponse
