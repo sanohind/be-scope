@@ -4,14 +4,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\DailyStockController;
 use App\Http\Controllers\Api\SyncController;
-use App\Http\Controllers\Api\StockByWhController;
-use App\Http\Controllers\Api\WarehouseOrderController;
-use App\Http\Controllers\Api\WarehouseOrderLineController;
-use App\Http\Controllers\Api\ProdHeaderController;
-use App\Http\Controllers\Api\SoInvoiceLineController;
-use App\Http\Controllers\Api\SoInvoiceLine2Controller;
-use App\Http\Controllers\Api\ReceiptPurchaseController;
-use App\Http\Controllers\Api\SyncLogController;
 use App\Http\Controllers\Api\Dashboard1Controller;
 use App\Http\Controllers\Api\Dashboard2Controller;
 use App\Http\Controllers\Api\Dashboard3Controller;
@@ -53,7 +45,7 @@ Route::prefix('local-auth')->group(function () {
     });
 });
 
-// ✅ SSO Authentication Routes (Sphere Token Validation)
+// SSO Authentication Routes (Sphere Token Validation)
 Route::prefix('auth')->middleware(\App\Http\Middleware\VerifySphereToken::class)->group(function () {
     Route::get('/user', [\App\Http\Controllers\Api\SSOAuthController::class, 'user']);
     Route::get('/verify', [\App\Http\Controllers\Api\SSOAuthController::class, 'verify']);
@@ -178,18 +170,6 @@ Route::prefix('wh-delivery-plan')->middleware(['jwt.auth', 'feature:planning-man
     Route::post('/delete-multiple', [WhDeliveryPlanController::class, 'destroyMultiple']);
 });
 
-// Public API Routes (add auth middleware if needed)
-Route::apiResources([
-    'stocks' => StockByWhController::class,
-    'warehouse-orders' => WarehouseOrderController::class,
-    'warehouse-order-lines' => WarehouseOrderLineController::class,
-    'production-headers' => ProdHeaderController::class,
-    'invoice-lines' => SoInvoiceLineController::class,
-    'invoice-lines-2' => SoInvoiceLine2Controller::class,
-    'receipt-purchases' => ReceiptPurchaseController::class,
-    'sync-logs' => SyncLogController::class,
-], ['only' => ['index', 'show']]);
-
 // ERP Sync API Routes
 Route::prefix('sync')->middleware(['jwt.auth'])->group(function () {
     // Start manual sync
@@ -205,9 +185,11 @@ Route::prefix('sync')->middleware(['jwt.auth'])->group(function () {
 });
 
 // Dashboard API Routes
-Route::prefix('dashboard')->group(function () {
+Route::prefix('dashboard')->middleware('jwt.auth')->group(function () {
+
     // Dashboard 1: Inventory Management & Stock Control
-    Route::prefix('inventory')->group(function () {
+    // Access: superadmin, top management, dept: WH, BRZ, CHS, NYL
+    Route::prefix('inventory')->middleware('feature:inventory')->group(function () {
         Route::get('/stock-level-overview', [Dashboard1Controller::class, 'stockLevelOverview']);
         Route::get('/stock-health-by-warehouse', [Dashboard1Controller::class, 'stockHealthByWarehouse']);
         Route::get('/top-critical-items', [Dashboard1Controller::class, 'topCriticalItems']);
@@ -221,7 +203,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 1 Revision: Inventory Management & Stock Control
-    Route::prefix('inventory-rev')->group(function () {
+    // Access: superadmin, top management, dept: WH, BRZ, CHS, NYL
+    Route::prefix('inventory-rev')->middleware('feature:inventory')->group(function () {
         Route::get('/kpi', [Dashboard1RevisionController::class, 'comprehensiveKpi']);
         Route::get('/stock-health-distribution', [Dashboard1RevisionController::class, 'stockHealthDistribution']);
         Route::get('/stock-movement-trend', [Dashboard1RevisionController::class, 'stockMovementTrend']);
@@ -242,7 +225,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 2: Warehouse Operations
-    Route::prefix('warehouse')->group(function () {
+    // Access: superadmin, top management, dept: WH, BRZ, CHS, NYL
+    Route::prefix('warehouse')->middleware('feature:inventory-movement')->group(function () {
         Route::get('/order-summary', [Dashboard2Controller::class, 'warehouseOrderSummary']);
         Route::get('/order-flow-analysis', [Dashboard2Controller::class, 'orderFlowAnalysis']);
         Route::get('/delivery-performance', [Dashboard2Controller::class, 'deliveryPerformance']);
@@ -257,7 +241,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 2 Revision: Warehouse Operations (Warehouse-Specific)
-    Route::prefix('warehouse-rev')->group(function () {
+    // Access: superadmin, top management, dept: WH, BRZ, CHS, NYL
+    Route::prefix('warehouse-rev')->middleware('feature:inventory-movement')->group(function () {
         Route::get('/order-summary', [Dashboard2RevisionController::class, 'warehouseOrderSummary']);
         Route::get('/delivery-performance', [Dashboard2RevisionController::class, 'deliveryPerformance']);
         Route::get('/order-status-distribution', [Dashboard2RevisionController::class, 'orderStatusDistribution']);
@@ -272,7 +257,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 3: Production Planning & Monitoring
-    Route::prefix('production')->group(function () {
+    // Access: superadmin, top management, dept: CHS, BRZ, NYL
+    Route::prefix('production')->middleware('feature:production')->group(function () {
         Route::get('/kpi-summary', [Dashboard3Controller::class, 'productionKpiSummary']);
         Route::get('/status-distribution', [Dashboard3Controller::class, 'productionStatusDistribution']);
         Route::get('/by-customer', [Dashboard3Controller::class, 'productionByCustomer']);
@@ -283,6 +269,7 @@ Route::prefix('dashboard')->group(function () {
         Route::get('/trend', [Dashboard3Controller::class, 'productionTrend']);
         Route::get('/outstanding-trend', [Dashboard3Controller::class, 'outstandingTrend']);
         Route::get('/daily-production-qty', [Dashboard3Controller::class, 'dailyProductionQty']);
+        Route::get('/daily-production-qty-detail', [Dashboard3Controller::class, 'dailyProductionQtyDetail']);
         Route::get('/daily-production-qty-odoo', [Dashboard3Controller::class, 'dailyProductionQtyOdoo']);
         Route::get('/daily-ng-qty', [Dashboard3Controller::class, 'dailyNgQty']);
         Route::get('/top-ng-type', [Dashboard3Controller::class, 'topNgType']);
@@ -291,7 +278,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 4: Sales & Shipment Analysis
-    Route::prefix('sales')->group(function () {
+    // Access: superadmin, top management, dept: MKT, PUR
+    Route::prefix('sales')->middleware('feature:sales')->group(function () {
         Route::get('/overview-kpi', [Dashboard4Controller::class, 'salesOverviewKpi']);
         Route::get('/revenue-trend', [Dashboard4Controller::class, 'revenueTrend']);
         Route::get('/top-customers-by-revenue', [Dashboard4Controller::class, 'topCustomersByRevenue']);
@@ -307,7 +295,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 5: Procurement & Receipt Analysis
-    Route::prefix('procurement')->group(function () {
+    // Access: superadmin, top management, dept: MKT, PUR (same as sales)
+    Route::prefix('procurement')->middleware('feature:sales')->group(function () {
         Route::get('/kpi', [Dashboard5Controller::class, 'procurementKpi']);
         Route::get('/receipt-performance', [Dashboard5Controller::class, 'receiptPerformance']);
         Route::get('/top-suppliers-by-value', [Dashboard5Controller::class, 'topSuppliersByValue']);
@@ -323,7 +312,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 6: Supply Chain Integration
-    Route::prefix('supply-chain')->group(function () {
+    // Access: superadmin, top management, dept: MKT, PUR (same as sales per user confirmation)
+    Route::prefix('supply-chain')->middleware('feature:sales')->group(function () {
         Route::get('/kpi', [Dashboard6Controller::class, 'supplyChainKpi']);
         Route::get('/order-to-cash-flow', [Dashboard6Controller::class, 'orderToCashFlow']);
         Route::get('/procure-to-pay-flow', [Dashboard6Controller::class, 'procureToPayFlow']);
@@ -339,7 +329,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 7: Financial Overview
-    Route::prefix('financial')->group(function () {
+    // Access: superadmin, top management, dept: MKT, PUR (same as sales per user confirmation)
+    Route::prefix('financial')->middleware('feature:sales')->group(function () {
         Route::get('/kpi', [Dashboard7Controller::class, 'financialKpi']);
         Route::get('/revenue-vs-cost-trend', [Dashboard7Controller::class, 'revenueVsCostTrend']);
         Route::get('/revenue-by-customer-segment', [Dashboard7Controller::class, 'revenueByCustomerSegment']);
@@ -354,7 +345,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard 8: Executive Summary
-    Route::prefix('executive')->group(function () {
+    // Access: superadmin, top management only (president-director, general-manager, manager)
+    Route::prefix('executive')->middleware('feature:asakai-content')->group(function () {
         Route::get('/overall-business-health', [Dashboard8Controller::class, 'overallBusinessHealth']);
         Route::get('/key-metrics-trend', [Dashboard8Controller::class, 'keyMetricsTrend']);
         Route::get('/inventory-health-summary', [Dashboard8Controller::class, 'inventoryHealthSummary']);
@@ -369,9 +361,13 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Dashboard HR: Human Resources
+    // Access: superadmin, top management, dept: HRD, GA
     Route::prefix('hr')->group(function () {
+        // Public login/refresh for HR-specific auth (no jwt.auth here)
         Route::post('/login', [HrDashboardController::class, 'login']);
         Route::post('/refresh', [HrDashboardController::class, 'refreshToken']);
+    });
+    Route::prefix('hr')->middleware('feature:hr')->group(function () {
         Route::get('/active-employees-count', [HrDashboardController::class, 'activeEmployeesCount']);
         Route::get('/employment-status-comparison', [HrDashboardController::class, 'employmentStatusComparison']);
         Route::get('/gender-distribution', [HrDashboardController::class, 'genderDistribution']);
@@ -384,7 +380,8 @@ Route::prefix('dashboard')->group(function () {
     });
 
     // Sales Analytics: Bar Chart Data
-    Route::prefix('sales-analytics')->group(function () {
+    // Access: superadmin, top management, dept: MKT, PUR (same as sales)
+    Route::prefix('sales-analytics')->middleware('feature:sales')->group(function () {
         Route::get('/bar-chart', [SalesAnalyticsController::class, 'getBarChartData']);
         Route::get('/daily-bar-chart', [SalesAnalyticsController::class, 'getDailyBarChartData']);
         Route::get('/sales-shipment', [SalesAnalyticsController::class, 'getSalesShipmentByPeriod']);
@@ -410,7 +407,7 @@ Route::prefix('asakai')->group(function () {
 
     // Asakai Charts
     Route::get('/charts', [AsakaiChartController::class, 'index']);
-    Route::post('/charts', [AsakaiChartController::class, 'store'])->middleware(['jwt.auth']);
+    Route::post('/charts', [AsakaiChartController::class, 'store'])->middleware(['jwt.auth', 'feature:asakai-input']);
     Route::get('/charts/data', [AsakaiChartController::class, 'getChartData']); // Get chart data with filled dates
     Route::get('/charts/available-dates', [AsakaiChartController::class, 'getAvailableDates']);
 
@@ -419,16 +416,16 @@ Route::prefix('asakai')->group(function () {
     Route::post('/charts/target', [AsakaiChartController::class, 'storeTarget'])->middleware(['jwt.auth', 'feature:asakai-content']);
     Route::delete('/charts/target/{id}', [AsakaiChartController::class, 'destroyTarget'])->middleware(['jwt.auth', 'feature:asakai-content']);
     Route::get('/charts/{id}', [AsakaiChartController::class, 'show']);
-    Route::put('/charts/{id}', [AsakaiChartController::class, 'update'])->middleware(['jwt.auth', 'feature:asakai-content']);
+    Route::put('/charts/{id}', [AsakaiChartController::class, 'update'])->middleware(['jwt.auth', 'feature:asakai-input']);
     Route::delete('/charts/{id}', [AsakaiChartController::class, 'destroy'])->middleware(['jwt.auth', 'feature:asakai-content']);
 
     // Asakai Reasons
     Route::get('/reasons', [AsakaiReasonController::class, 'index']);
     Route::get('/reasons/export-pdf', [AsakaiReasonController::class, 'exportPdf']);
-    Route::post('/reasons', [AsakaiReasonController::class, 'store'])->middleware(['jwt.auth']);
+    Route::post('/reasons', [AsakaiReasonController::class, 'store'])->middleware(['jwt.auth', 'feature:asakai-input']);
     Route::get('/reasons/{id}', [AsakaiReasonController::class, 'show']);
-    Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth']);
-    Route::post('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth']); // POST alias for file upload support
+    Route::put('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth', 'feature:asakai-input']);
+    Route::post('/reasons/{id}', [AsakaiReasonController::class, 'update'])->middleware(['jwt.auth', 'feature:asakai-input']); // POST alias for file upload support
     Route::delete('/reasons/{id}', [AsakaiReasonController::class, 'destroy'])->middleware(['jwt.auth', 'feature:asakai-content']);
     Route::get('/charts/{chartId}/reasons', [AsakaiReasonController::class, 'getByChart']);
 });

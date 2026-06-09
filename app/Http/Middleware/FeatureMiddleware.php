@@ -40,20 +40,44 @@ class FeatureMiddleware
         return response()->json(['success' => false, 'message' => 'Forbidden - You do not have permission to access this feature'], 403);
     }
 
+    private function getRoleLevel(?string $roleSlug): int
+    {
+        if (!$roleSlug) return 99; // Default no level
+        
+        $levels = [
+            'superadmin' => 1,
+            'president-director' => 2,
+            'division-head' => 3,
+            'general-manager' => 4,
+            'manager' => 5,
+            'supervisor' => 6,
+            'leader' => 7,
+            'staff' => 8,
+        ];
+
+        return $levels[$roleSlug] ?? 99;
+    }
+
     private function hasAccess(?string $roleSlug, ?string $deptCode, string $feature): bool
     {
         if ($roleSlug === 'superadmin') {
             return true;
         }
 
-        $topManagementRoles = ['president-director', 'general-manager', 'manager'];
-        $isTopManagement = in_array($roleSlug, $topManagementRoles);
+        $roleLevel = $this->getRoleLevel($roleSlug);
+        // Top Management is Manager and above (Level <= 5)
+        $isTopManagement = $roleLevel <= 5;
 
         switch ($feature) {
             case 'asakai-board':
                 return true;
 
+            case 'asakai-input':
+                // Supervisor and above (Level <= 6)
+                return $roleLevel <= 6;
+
             case 'asakai-content':
+                // Manager and above (Level <= 5)
                 return $isTopManagement;
 
             case 'planning-manage':
