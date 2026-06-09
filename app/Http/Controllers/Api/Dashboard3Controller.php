@@ -1027,6 +1027,9 @@ class Dashboard3Controller extends ApiController
 
         $productions = $query->get();
         $dailyData = [];
+        $prodIdToPeriod = [];
+        $searchIds = [];
+        $uniqueNgNames = [];
 
         foreach ($productions as $prod) {
             $date = $this->extractMongoDate($prod->production_time ?? $prod->created_at ?? null, $period);
@@ -1037,14 +1040,78 @@ class Dashboard3Controller extends ApiController
             }
 
             $dailyData[$date]['qty_ng'] += (int) ($prod->qty ?? 0);
+
+            $rawId = $prod->id ?? $prod->_id ?? null;
+            if ($rawId) {
+                $strId = (string) $rawId;
+                $searchIds[] = $strId;
+                $prodIdToPeriod[$strId] = $date;
+            }
         }
+
+        $searchIds = array_unique($searchIds);
+
+        if (!empty($searchIds)) {
+            $chunks = array_chunk($searchIds, 1000);
+            
+            foreach ($chunks as $chunk) {
+                $details = DB::connection('kelola')->table('production_details')
+                    ->whereIn('production_id', $chunk)
+                    ->get();
+
+                foreach ($details as $detail) {
+                    $prodId = (string) ($detail->production_id ?? '');
+                    if (isset($prodIdToPeriod[$prodId])) {
+                        $date = $prodIdToPeriod[$prodId];
+                        $ngName = $detail->ng_name ?? 'Unknown';
+                        $uniqueNgNames[$ngName] = true;
+                        
+                        if (!isset($dailyData[$date][$ngName])) {
+                            $dailyData[$date][$ngName] = 0;
+                        }
+                        $dailyData[$date][$ngName] += (int) ($detail->qty ?? 0);
+                    }
+                }
+            }
+        }
+
+        // Fill missing 0 for all unique NG names in every period
+        foreach ($dailyData as $date => &$item) {
+            foreach (array_keys($uniqueNgNames) as $ngName) {
+                if (!isset($item[$ngName])) {
+                    $item[$ngName] = 0;
+                }
+            }
+        }
+        unset($item);
 
         ksort($dailyData);
 
         if ($dateFrom && $dateTo) {
             $allPeriods = $this->generateAllPeriods($period, $dateFrom, $dateTo);
-            $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData) {
-                return $dailyData[$date] ?? ['period' => $date, 'qty_ng' => 0];
+            
+            if ($period === 'daily') {
+                $allPeriods = array_filter($allPeriods, function($p) use ($dateFrom, $dateTo) {
+                    return $p >= Carbon::parse($dateFrom)->format('Y-m-d') && $p <= Carbon::parse($dateTo)->format('Y-m-d');
+                });
+            } elseif ($period === 'monthly') {
+                $allPeriods = array_filter($allPeriods, function($p) use ($dateFrom, $dateTo) {
+                    return $p >= Carbon::parse($dateFrom)->format('Y-m') && $p <= Carbon::parse($dateTo)->format('Y-m');
+                });
+            }
+
+            $allPeriods = array_values($allPeriods);
+            
+            $dailyData = collect($allPeriods)->map(function ($date) use ($dailyData, $uniqueNgNames) {
+                if (isset($dailyData[$date])) {
+                    return $dailyData[$date];
+                }
+                
+                $emptyItem = ['period' => $date, 'qty_ng' => 0];
+                foreach (array_keys($uniqueNgNames) as $ngName) {
+                    $emptyItem[$ngName] = 0;
+                }
+                return $emptyItem;
             })->toArray();
         } else {
             $dailyData = array_values($dailyData);
@@ -1052,6 +1119,7 @@ class Dashboard3Controller extends ApiController
 
         return response()->json([
             'data' => $dailyData,
+            'ng_names' => array_keys($uniqueNgNames),
             'filter_metadata' => $this->getPeriodMetadata($request, 'production_time'),
             'divisi_filter' => $this->getDivisiFilterMetadata($divisiSelection),
         ]);
